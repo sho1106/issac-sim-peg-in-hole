@@ -1,0 +1,39 @@
+# 上流の固定（このファイルが正本）
+# setup_stack.ps1 がこれを読んで clone -> checkout -> パッチ適用を行う。
+# 上流は両方とも公開リポジトリなので、この1リポジトリを clone すれば再現できる。
+
+[isaaclab]
+url    = https://github.com/isaac-sim/IsaacLab.git
+tag    = v2.3.2
+commit = 37ddf62687
+dest   = D:\IsaacStack\IsaacLab        # 短いパスに置くこと（README 3.1）
+
+patch  = patches/isaaclab/0001-feat-tasks-peg-in-hole-Factory-Forge-7.patch
+         sha256 258a1ca3c6c5086a037c419525fea7a6c0af0b2fff9d91cd6101a717216d5800
+patch  = patches/isaaclab/0002-feat-factory-plan17-rigid_grasp-OFF.patch
+         sha256 4073502c576b1b54339a9e3c068907e320b225561ab28eb866d3e90edbddc0ef
+
+[tacex]
+url    = https://github.com/DH-Ng/TacEx.git
+commit = adceed41afb7cb48f9ec1f66a662fb8e5a06627f
+dest   = D:\IsaacStack\TacEx
+submodule = none                        # libuipc は初期化しない（README 3.1）
+
+patch  = patches/tacex/0001-windows-blackwell-compat.patch
+         sha256 8a24a4b15a6dce5783797a493675a40d87fdc1701728d4441c001875e3aed9f4
+patch  = patches/tacex/0002-stage-profiling.patch
+         sha256 17ca8c3ae6bdccc91494cc8fbbd6f475abf2746fc388e68347725ea37e8e737c
+patch  = patches/tacex/0003-tactile-observation-wiring.patch
+         sha256 c6412d55ce29ff8504d09e31ca3f1235ab18bd42cd960a759eb875d5525105ff
+patch  = patches/tacex/0004-paper-table1-driver.patch
+         sha256 67d8858840e4dabd802706e715733b7de950d63c7d6fd4829607e9795d13b2e4
+patch  = patches/tacex/0005-uipc-floating-cube-example.patch
+         sha256 4a99d5fcc981c62956e788a0a734f7352b3807fe3c46340203749693e778339e
+
+[pyuipc]
+source = pip
+version = 0.0.25
+
+# 含まれないもの（意図的）
+#   source/tacex_uipc/examples/assets/sphere_tet_*.usd  … tetgen で再生成できる四面体メッシュ
+#     （合計 2.7MB・UIPC 経路でのみ使う。README で検証した3実験には不要）

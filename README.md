@@ -25,8 +25,8 @@
 | OS | Windows 11 Pro 26200 | |
 | Python | 3.11.9 | Isaac Sim 5.1 は 3.11 系が前提 |
 | Isaac Sim | 5.1.0.0 | pip 版 |
-| Isaac Lab | v2.3.2 ＋ カスタムタスク7種 | フォーク（`ext/IsaacLab`） |
-| TacEx | 上流 `adceed41` ＋ Blackwell 対応 | フォーク（`ext/TacEx`） |
+| Isaac Lab | 公式 v2.3.2 ＋ カスタムタスク7種 | `patches/isaaclab/` を当てる |
+| TacEx | 上流 `adceed41` ＋ Blackwell 対応 | `patches/tacex/` を当てる |
 | PyTorch | 2.7.0+cu128 | **CPU 版に巻き上がると全部壊れる** |
 | CUDA | 12.8（torch 同梱） | `sm_120` を含んでビルドされている |
 | numpy | 1.26.0 | **2.x に上げると Isaac が動かない** |
@@ -47,10 +47,13 @@
 
 ```
 issac-sim-peg-in-hole/
-├─ ext/
-│   ├─ IsaacLab/          submodule: Isaac Lab フォーク（カスタムタスク7種）
-│   └─ TacEx/             submodule: TacEx フォーク（Blackwell 対応＋触覚観測）
+├─ external/
+│   └─ UPSTREAM.lock      上流の URL・commit・パッチの sha256 を固定（正本）
+├─ patches/
+│   ├─ isaaclab/          公式 v2.3.2 との差分（2本・カスタムタスク7種）
+│   └─ tacex/             上流 adceed41 との差分（5本・Blackwell 対応＋触覚観測）
 ├─ scripts/
+│   ├─ setup_stack.ps1    上流を clone してパッチを当てる（冪等）
 │   ├─ doctor.py          Blackwell 固有の地雷を数秒で判定（Isaac を起動しない）
 │   ├─ verify_setup.py    Isaac を起動してタスク登録を確認（約10秒）
 │   ├─ exp_forge/         FORGE の評価・録画
@@ -87,11 +90,23 @@ ImportError: cannot import name 'GelSightSensor' from 'tacex' (unknown location)
 **短いパスに置くこと。** Isaac Lab はパスの深いファイル（最長で相対 144 文字）を含み、深い階層に clone すると `Filename too long` で checkout が途中で止まる。
 
 ```powershell
-git config --global core.longpaths true
-git clone --recurse-submodules https://github.com/sho1106/issac-sim-peg-in-hole.git D:\Common\github\issac-sim-peg-in-hole
+git clone https://github.com/sho1106/issac-sim-peg-in-hole.git D:\Common\github\issac-sim-peg-in-hole
+cd D:\Common\github\issac-sim-peg-in-hole
+.\scripts\setup_stack.ps1
 ```
 
-> TacEx が入れ子で持つ submodule `libuipc` は**初期化しない**。1段だけで足りる。初期化するとソースビルドが走る。
+`setup_stack.ps1` は `external\UPSTREAM.lock` を読んで次をやる。冪等なので何度実行してもよい。
+
+1. `core.longpaths` を有効にする（無いと IsaacLab の checkout が止まる）
+2. 公式 IsaacLab を clone → `v2.3.2` を checkout → `patches/isaaclab/` を `git am` で適用
+3. 上流 TacEx を clone → `adceed41` を checkout → `patches/tacex/` を `git apply` で適用
+4. 適用前にパッチの **sha256 を `UPSTREAM.lock` と照合**し、違えば中止する
+
+置き場所は既定で `D:\IsaacStack`。変えるなら `-StackRoot E:\IsaacStack`。
+
+> **上流は両方とも公開リポジトリ**（`isaac-sim/IsaacLab` と `DH-Ng/TacEx`）なので、**このリポジトリを clone するだけで再現できる**。追加のリポジトリも NAS も要らない。
+>
+> TacEx が入れ子で持つ submodule `libuipc` は**初期化しない**（`setup_stack.ps1` もしない）。初期化するとソースビルドが走る。
 
 ### 3.2 venv と Isaac Sim
 
@@ -115,13 +130,13 @@ pip install -c env\constraints.txt "isaacsim[all,extscache]==5.1.0.0" --extra-in
 
 ```powershell
 pip install setuptools==75.8.0 wheel toml
-cd ext\IsaacLab
-pip install -c ..\..\env\constraints.txt --no-build-isolation -e source\isaaclab
-pip install -c ..\..\env\constraints.txt --no-build-isolation -e source\isaaclab_assets
-pip install -c ..\..\env\constraints.txt --no-build-isolation -e source\isaaclab_mimic
-pip install -c ..\..\env\constraints.txt --no-build-isolation -e source\isaaclab_rl
-pip install -c ..\..\env\constraints.txt --no-build-isolation -e source\isaaclab_tasks
-pip install -c ..\..\env\constraints.txt rl-games==1.6.5 gym==0.26.2 numba==0.59.1
+cd D:\IsaacStack\IsaacLab
+pip install -c D:\Common\github\issac-sim-peg-in-hole\env\constraints.txt --no-build-isolation -e source\isaaclab
+pip install -c D:\Common\github\issac-sim-peg-in-hole\env\constraints.txt --no-build-isolation -e source\isaaclab_assets
+pip install -c D:\Common\github\issac-sim-peg-in-hole\env\constraints.txt --no-build-isolation -e source\isaaclab_mimic
+pip install -c D:\Common\github\issac-sim-peg-in-hole\env\constraints.txt --no-build-isolation -e source\isaaclab_rl
+pip install -c D:\Common\github\issac-sim-peg-in-hole\env\constraints.txt --no-build-isolation -e source\isaaclab_tasks
+pip install -c D:\Common\github\issac-sim-peg-in-hole\env\constraints.txt rl-games==1.6.5 gym==0.26.2 numba==0.59.1
 ```
 
 > **`setuptools==75.8.0` の固定が要る理由**: setuptools 81+ が `pkg_resources` を撤去したのに、依存の `flatdict==4.0.1` の setup.py が `import pkg_resources` する。ビルド分離環境にも最新 setuptools が入るため、venv に古いものを入れるだけでは回避できない。`--no-build-isolation` と併用して venv 側を使わせる。
@@ -139,9 +154,9 @@ robocopy D:\IsaacStack\env_isaaclab D:\IsaacStack\env_tacex_isaac /E /MT:16   # 
 ```powershell
 $PY="D:\IsaacStack\env_tacex_isaac\Scripts\python.exe"
 & $PY -m pip install torch-scatter -f https://data.pyg.org/whl/torch-2.7.0+cu128.html
-& $PY -m pip install -e ext\TacEx\source\tacex_assets
-& $PY -m pip install -e ext\TacEx\source\tacex
-& $PY -m pip install -e ext\TacEx\source\tacex_tasks
+& $PY -m pip install -e D:\IsaacStack\TacEx\source\tacex_assets
+& $PY -m pip install -e D:\IsaacStack\TacEx\source\tacex
+& $PY -m pip install -e D:\IsaacStack\TacEx\source\tacex_tasks
 & $PY -m pip install pyuipc
 & $PY -m pip install h5py==3.11.0      # GUI を使うなら必須（§6.3）
 ```
@@ -197,7 +212,7 @@ cmd /c "D:\IsaacStack\env_tacex_isaac\Scripts\python.exe -u scripts\verify_setup
 
 ```powershell
 # 学習
-cmd /c "$FORGE_PY -u ext\IsaacLab\scripts\reinforcement_learning\rl_games\train.py `
+cmd /c "$FORGE_PY -u D:\IsaacStack\IsaacLab\scripts\reinforcement_learning\rl_games\train.py `
     --task Isaac-Forge-PegInsertBlind-Direct-v0 --num_envs 128 --headless --seed 0 `
     --max_iterations 200 agent.params.config.full_experiment_name=my_run > train.log 2>&1"
 
@@ -221,7 +236,7 @@ cmd /c "$FORGE_PY -u scripts\exp_forge\render_rl_policy.py `
 
 ```powershell
 # 学習
-cmd /c "$TACEX_PY -u ext\TacEx\scripts\reinforcement_learning\rl_games\train.py `
+cmd /c "$TACEX_PY -u D:\IsaacStack\TacEx\scripts\reinforcement_learning\rl_games\train.py `
     --task TacEx-Factory-PegInsert-Direct-v0 --num_envs 128 --headless --enable_cameras `
     --seed 0 --max_iterations 200 `
     agent.params.config.full_experiment_name=my_arm_off > train.log 2>&1"
@@ -237,7 +252,7 @@ cmd /c "$TACEX_PY -u scripts\exp_tacex\run_l0_l2a.py --layer L2a --noise_mm 1.0 
 
 ```powershell
 # 学習
-cmd /c "$TACEX_PY -u ext\TacEx\scripts\reinforcement_learning\rl_games\train.py `
+cmd /c "$TACEX_PY -u D:\IsaacStack\TacEx\scripts\reinforcement_learning\rl_games\train.py `
     --task TacEx-Factory-PegInsert-Direct-v0 --num_envs 128 --headless --enable_cameras `
     --seed 0 --max_iterations 200 env.tactile_in_obs=True `
     agent.params.config.full_experiment_name=my_arm_on > train.log 2>&1"
@@ -444,7 +459,20 @@ verify_on_replay.mp4 / verify_on_replay_preview.png
 
 `*_meta.json` に checkpoint・δ テーブル・`observation_space`・`clip_actions` が残るので、後から条件を突き合わせられる。
 
-### 7.5 既存資産の保全
+### 7.5 パッチが上流の素の状態に当たること（2026-08-19 実測）
+
+`patches/` が本当に上流から改造版を再現できるかを、上流の素のコミットに一時 worktree を作って確かめた。
+
+| 上流 | 検証 | 結果 |
+|---|---|---|
+| IsaacLab | 素の `v2.3.2` に `git am` で2本適用 | **成功**。2コミットがメッセージ付きで復元 |
+| IsaacLab | 適用後のツリーハッシュ vs 実フォーク `peg-in-hole/v2.3.2-custom` | **完全一致**（`0619f0c05e25...`） |
+| TacEx | 素の `adceed41` に `git apply` で5本適用 | **成功**（5本とも） |
+| TacEx | 適用後の9ファイル vs 現在の作業ツリー | **全9ファイル一致**（改行を正規化して比較） |
+
+∴ **`patches/` だけで両上流の改造版を再現できる。** フォークのリポジトリを別に持つ必要はない。
+
+### 7.6 既存資産の保全
 
 smoke 学習は `full_experiment_name` を別名にしたので、既存のチェックポイントは1つも壊れていない。
 

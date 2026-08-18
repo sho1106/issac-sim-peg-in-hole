@@ -1,0 +1,71 @@
+diff --git a/source/tacex/tacex/gelsight_sensor.py b/source/tacex/tacex/gelsight_sensor.py
+index efa481a..013fc71 100644
+--- a/source/tacex/tacex/gelsight_sensor.py
++++ b/source/tacex/tacex/gelsight_sensor.py
+@@ -1,6 +1,8 @@
+ from __future__ import annotations
+ 
+ import numpy as np
++import os
++import time
+ import torch
+ from collections.abc import Sequence
+ from matplotlib import pyplot as plt
+@@ -340,6 +342,24 @@ class GelSightSensor(SensorBase):
+         # todo print init data
+         # print(self)
+ 
++    # --- [peg-in-hole port 2026-08-03] 論文(arXiv 2411.04776) Table 1 の3段計時 -------------
++    # 論文は height map 生成 / optical / marker を分けて ms/frame を報告するが、実装には計時が無い。
++    # 既定は無効（cuda 同期のコストを払わない）。環境変数 TACEX_STAGE_PROFILE=1 で有効化する。
++    def _stage_tic(self):
++        if not hasattr(self, "_stage_prof"):
++            self._stage_prof = os.environ.get("TACEX_STAGE_PROFILE") == "1"
++            self.stage_times_ms: dict[str, list[float]] = {}
++        if not self._stage_prof:
++            return None
++        torch.cuda.synchronize()
++        return time.perf_counter()
++
++    def _stage_toc(self, key: str, t0):
++        if t0 is None:
++            return
++        torch.cuda.synchronize()
++        self.stage_times_ms.setdefault(key, []).append((time.perf_counter() - t0) * 1000.0)
++
+     # MARK: _update_buffers_impl
+     def _update_buffers_impl(self, env_ids: Sequence[int]):
+         """Updates the internal buffer with the latest data from the sensor.
+@@ -355,6 +375,8 @@ class GelSightSensor(SensorBase):
+ 
+         self._frame[env_ids] += 1
+ 
++        _t_hm = self._stage_tic()   # ← 段1: height map 生成（カメラ更新＋押し込み量）
++
+         # -- update camera buffer
+         if self.camera is not None:
+             self.camera._timestamp = self._timestamp
+@@ -366,6 +388,8 @@ class GelSightSensor(SensorBase):
+             # -- pressing depth
+             self._indentation_depth[:] = self.compute_indentation_depth_func()  # type: ignore #todo uncomment
+ 
++        self._stage_toc("height_map", _t_hm)
++
+         if "camera_depth" in self._data.output:
+             self._get_camera_depth()
+ 
+@@ -374,10 +398,14 @@ class GelSightSensor(SensorBase):
+ 
+         if (self.optical_simulator is not None) and ("tactile_rgb" in self.cfg.data_types):
+             # self.optical_simulator.height_map = self._data.output["height_map"]
++            _t_opt = self._stage_tic()   # ← 段2: optical（Taxim）
+             self._data.output["tactile_rgb"][:] = self.optical_simulator.optical_simulation()
++            self._stage_toc("optical", _t_opt)
+ 
+         if (self.marker_motion_simulator is not None) and ("marker_motion" in self.cfg.data_types):
++            _t_mrk = self._stage_tic()   # ← 段3: marker（FOTS）
+             self._data.output["marker_motion"][:] = self.marker_motion_simulator.marker_motion_simulation()
++            self._stage_toc("marker", _t_mrk)
+ 
+     def _set_debug_vis_impl(self, debug_vis: bool):
+         # we actually set the debug_vis in _initialize_impl, since we need the _prim_view, which

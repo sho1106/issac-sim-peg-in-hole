@@ -1,0 +1,912 @@
+From 2133d6c36c97b60a01773921cec557cb3df7bbdc Mon Sep 17 00:00:00 2001
+From: sho1106 <shota.ishikawa.1106@gmail.com>
+Date: Sun, 19 Jul 2026 15:18:34 +0900
+Subject: [PATCH 1/2] =?UTF-8?q?feat(tasks):=20peg-in-hole=E7=A0=94?=
+ =?UTF-8?q?=E7=A9=B6=E7=94=A8=E3=81=AEFactory/Forge=E3=82=AB=E3=82=B9?=
+ =?UTF-8?q?=E3=82=BF=E3=83=A0=E3=82=BF=E3=82=B9=E3=82=AF7=E7=A8=AE?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+D:\IsaacStack\IsaacLab で未コミットのまま運用していた改変を、
+再現性確保のためGitea(IsaacLab-fork)へ保全する初回コミット。
+ベース= v2.3.2 (37ddf62)。
+
+登録タスク:
+- Isaac-Factory-CylInsert-Direct-v0   円筒ペグ挿入(自作幾何・クリアランス0.5mm)
+- Isaac-Forge-PegInsertBlind-Direct-v0    力覚のみ(視覚遮断)
+- Isaac-Forge-PegInsertBlindDR-Direct-v0  同上+ドメインランダム化
+- Isaac-Forge-PegInsertRPTilt-Direct-v0   roll/pitch傾き制御
+- Isaac-Forge-PegInsertOracle-Direct-v0   特権情報あり上限測定用
+- Isaac-Forge-PegSearchMap-Direct-v0      探索マップ利用
+- Isaac-Forge-PegSearchMapDR-Direct-v0    同上+ドメインランダム化
+
+Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>
+---
+ .../isaaclab_tasks/direct/factory/__init__.py |  10 ++
+ .../direct/factory/factory_env.py             |  24 ++-
+ .../direct/factory/factory_env_cfg.py         |  11 +-
+ .../direct/factory/factory_tasks_cfg.py       |  99 +++++++++++
+ .../direct/factory/factory_utils.py           |  11 ++
+ .../isaaclab_tasks/direct/forge/__init__.py   |  60 +++++++
+ .../forge/agents/rl_games_ppo_cfg_oracle.yaml | 130 +++++++++++++++
+ .../forge/agents/rl_games_ppo_cfg_rptilt.yaml | 123 ++++++++++++++
+ .../isaaclab_tasks/direct/forge/forge_env.py  |  94 ++++++++++-
+ .../direct/forge/forge_env_cfg.py             | 157 +++++++++++++++++-
+ 10 files changed, 711 insertions(+), 8 deletions(-)
+ create mode 100644 source/isaaclab_tasks/isaaclab_tasks/direct/forge/agents/rl_games_ppo_cfg_oracle.yaml
+ create mode 100644 source/isaaclab_tasks/isaaclab_tasks/direct/forge/agents/rl_games_ppo_cfg_rptilt.yaml
+
+diff --git a/source/isaaclab_tasks/isaaclab_tasks/direct/factory/__init__.py b/source/isaaclab_tasks/isaaclab_tasks/direct/factory/__init__.py
+index 54d69f31f6..119e4e5e5a 100644
+--- a/source/isaaclab_tasks/isaaclab_tasks/direct/factory/__init__.py
++++ b/source/isaaclab_tasks/isaaclab_tasks/direct/factory/__init__.py
+@@ -40,3 +40,13 @@ gym.register(
+         "rl_games_cfg_entry_point": f"{agents.__name__}:rl_games_ppo_cfg.yaml",
+     },
+ )
++
++gym.register(
++    id="Isaac-Factory-CylInsert-Direct-v0",
++    entry_point=f"{__name__}.factory_env:FactoryEnv",
++    disable_env_checker=True,
++    kwargs={
++        "env_cfg_entry_point": f"{__name__}.factory_env_cfg:FactoryTaskCylInsertCfg",
++        "rl_games_cfg_entry_point": f"{agents.__name__}:rl_games_ppo_cfg.yaml",
++    },
++)
+diff --git a/source/isaaclab_tasks/isaaclab_tasks/direct/factory/factory_env.py b/source/isaaclab_tasks/isaaclab_tasks/direct/factory/factory_env.py
+index a4e9c6d9ec..312aecb427 100644
+--- a/source/isaaclab_tasks/isaaclab_tasks/direct/factory/factory_env.py
++++ b/source/isaaclab_tasks/isaaclab_tasks/direct/factory/factory_env.py
+@@ -51,9 +51,23 @@ class FactoryEnv(DirectRLEnv):
+         )
+ 
+         # Set masses and frictions.
+-        factory_utils.set_friction(self._held_asset, self.cfg_task.held_asset_cfg.friction, self.scene.num_envs)
+-        factory_utils.set_friction(self._fixed_asset, self.cfg_task.fixed_asset_cfg.friction, self.scene.num_envs)
+-        factory_utils.set_friction(self._robot, self.cfg_task.robot_cfg.friction, self.scene.num_envs)
++        friction_dr = getattr(self.cfg, "friction_dr_range", None)
++        if friction_dr is not None:
++            # Friction domain randomization: sample one contact friction per env (log-uniform
++            # over [low, high]) and apply the same value to both contacting assets (matches the
++            # fixed-mu eval semantics where held==fixed==mu). Robot kept at nominal.
++            lo, hi = float(friction_dr[0]), float(friction_dr[1])
++            g = torch.Generator(device="cpu").manual_seed(1234)
++            u = torch.rand(self.scene.num_envs, generator=g)
++            mus = torch.exp(u * (torch.log(torch.tensor(hi)) - torch.log(torch.tensor(lo))) + torch.log(torch.tensor(lo)))
++            self._dr_friction_values = mus
++            factory_utils.set_friction_per_env(self._held_asset, mus, self.scene.num_envs)
++            factory_utils.set_friction_per_env(self._fixed_asset, mus, self.scene.num_envs)
++            factory_utils.set_friction(self._robot, self.cfg_task.robot_cfg.friction, self.scene.num_envs)
++        else:
++            factory_utils.set_friction(self._held_asset, self.cfg_task.held_asset_cfg.friction, self.scene.num_envs)
++            factory_utils.set_friction(self._fixed_asset, self.cfg_task.fixed_asset_cfg.friction, self.scene.num_envs)
++            factory_utils.set_friction(self._robot, self.cfg_task.robot_cfg.friction, self.scene.num_envs)
+ 
+     def _init_tensors(self):
+         """Initialize tensors once."""
+@@ -269,6 +283,10 @@ class FactoryEnv(DirectRLEnv):
+         ctrl_target_fingertip_midpoint_pos = self.fingertip_midpoint_pos + pos_actions
+         # To speed up learning, never allow the policy to move more than 5cm away from the base.
+         fixed_pos_action_frame = self.fixed_pos_obs_frame + self.init_fixed_pos_obs_noise
++        if getattr(self.cfg, "blind_anchor", False):
++            # Blind variant: clip box is anchored at the episode-start fingertip position,
++            # not the hole frame, so no hole information reaches the policy via clipping.
++            fixed_pos_action_frame = self.init_fingertip_anchor
+         delta_pos = ctrl_target_fingertip_midpoint_pos - fixed_pos_action_frame
+         pos_error_clipped = torch.clip(
+             delta_pos, -self.cfg.ctrl.pos_action_bounds[0], self.cfg.ctrl.pos_action_bounds[1]
+diff --git a/source/isaaclab_tasks/isaaclab_tasks/direct/factory/factory_env_cfg.py b/source/isaaclab_tasks/isaaclab_tasks/direct/factory/factory_env_cfg.py
+index 0e6b5db0a7..5de80f3635 100644
+--- a/source/isaaclab_tasks/isaaclab_tasks/direct/factory/factory_env_cfg.py
++++ b/source/isaaclab_tasks/isaaclab_tasks/direct/factory/factory_env_cfg.py
+@@ -12,10 +12,12 @@ from isaaclab.sim import PhysxCfg, SimulationCfg
+ from isaaclab.sim.spawners.materials.physics_materials_cfg import RigidBodyMaterialCfg
+ from isaaclab.utils import configclass
+ 
+-from .factory_tasks_cfg import ASSET_DIR, FactoryTask, GearMesh, NutThread, PegInsert
++from .factory_tasks_cfg import ASSET_DIR, CylInsert, FactoryTask, GearMesh, NutThread, PegInsert
+ 
+ OBS_DIM_CFG = {
+     "fingertip_pos": 3,
++    "fingertip_pos_rel_init": 3,
++    "map_belief": 4,
+     "fingertip_pos_rel_fixed": 3,
+     "fingertip_quat": 4,
+     "ee_linvel": 3,
+@@ -207,3 +209,10 @@ class FactoryTaskNutThreadCfg(FactoryEnvCfg):
+     task_name = "nut_thread"
+     task = NutThread()
+     episode_length_s = 30.0
++
++
++@configclass
++class FactoryTaskCylInsertCfg(FactoryEnvCfg):
++    task_name = "peg_insert"
++    task = CylInsert()
++    episode_length_s = 10.0
+diff --git a/source/isaaclab_tasks/isaaclab_tasks/direct/factory/factory_tasks_cfg.py b/source/isaaclab_tasks/isaaclab_tasks/direct/factory/factory_tasks_cfg.py
+index c631856816..8e0d74ce3f 100644
+--- a/source/isaaclab_tasks/isaaclab_tasks/direct/factory/factory_tasks_cfg.py
++++ b/source/isaaclab_tasks/isaaclab_tasks/direct/factory/factory_tasks_cfg.py
+@@ -445,3 +445,102 @@ class NutThread(FactoryTask):
+         ),
+         actuators={},
+     )
++
++
++# ============================================================================
++# CylInsert: 我々の幾何（円柱ペグ d10 / 穴 bore d11=0.5mmクリアランス / 面取り0.5mm）
++# ローカル自作USD（peg_demo/assets）。peg_insert ロジックを全流用。
++# ============================================================================
++@configclass
++class CylPeg(HeldAssetCfg):
++    usd_path = "D:/IsaacStack/peg_demo/assets/cyl_peg.usd"
++    diameter = 0.010
++    height = 0.050
++    mass = 0.05
++
++
++@configclass
++class CylHole(FixedAssetCfg):
++    usd_path = "D:/IsaacStack/peg_demo/assets/cyl_hole.usd"
++    diameter = 0.011
++    height = 0.025
++    base_height = 0.0
++    mass = 0.5
++
++
++@configclass
++class CylInsert(FactoryTask):
++    name = "peg_insert"
++    fixed_asset_cfg = CylHole()
++    held_asset_cfg = CylPeg()
++    asset_size = 10.0
++    duration_s = 10.0
++
++    hand_init_pos: list = [0.0, 0.0, 0.047]
++    hand_init_pos_noise: list = [0.02, 0.02, 0.01]
++    hand_init_orn: list = [3.1416, 0.0, 0.0]
++    hand_init_orn_noise: list = [0.0, 0.0, 0.785]
++
++    fixed_asset_init_pos_noise: list = [0.05, 0.05, 0.05]
++    fixed_asset_init_orn_deg: float = 0.0
++    fixed_asset_init_orn_range_deg: float = 360.0
++
++    held_asset_pos_noise: list = [0.003, 0.0, 0.003]
++    held_asset_rot_init: float = 0.0
++
++    keypoint_coef_baseline: list = [5, 4]
++    keypoint_coef_coarse: list = [50, 2]
++    keypoint_coef_fine: list = [100, 0]
++    success_threshold: float = 0.04
++    engage_threshold: float = 0.9
++
++    fixed_asset: ArticulationCfg = ArticulationCfg(
++        prim_path="/World/envs/env_.*/FixedAsset",
++        spawn=sim_utils.UsdFileCfg(
++            usd_path=fixed_asset_cfg.usd_path,
++            activate_contact_sensors=True,
++            rigid_props=sim_utils.RigidBodyPropertiesCfg(
++                disable_gravity=False,
++                max_depenetration_velocity=5.0,
++                linear_damping=0.0,
++                angular_damping=0.0,
++                max_linear_velocity=1000.0,
++                max_angular_velocity=3666.0,
++                enable_gyroscopic_forces=True,
++                solver_position_iteration_count=192,
++                solver_velocity_iteration_count=1,
++                max_contact_impulse=1e32,
++            ),
++            mass_props=sim_utils.MassPropertiesCfg(mass=fixed_asset_cfg.mass),
++            collision_props=sim_utils.CollisionPropertiesCfg(contact_offset=0.005, rest_offset=0.0),
++        ),
++        init_state=ArticulationCfg.InitialStateCfg(
++            pos=(0.6, 0.0, 0.05), rot=(1.0, 0.0, 0.0, 0.0), joint_pos={}, joint_vel={}
++        ),
++        actuators={},
++    )
++    held_asset: ArticulationCfg = ArticulationCfg(
++        prim_path="/World/envs/env_.*/HeldAsset",
++        spawn=sim_utils.UsdFileCfg(
++            usd_path=held_asset_cfg.usd_path,
++            activate_contact_sensors=True,
++            rigid_props=sim_utils.RigidBodyPropertiesCfg(
++                disable_gravity=True,
++                max_depenetration_velocity=5.0,
++                linear_damping=0.0,
++                angular_damping=0.0,
++                max_linear_velocity=1000.0,
++                max_angular_velocity=3666.0,
++                enable_gyroscopic_forces=True,
++                solver_position_iteration_count=192,
++                solver_velocity_iteration_count=1,
++                max_contact_impulse=1e32,
++            ),
++            mass_props=sim_utils.MassPropertiesCfg(mass=held_asset_cfg.mass),
++            collision_props=sim_utils.CollisionPropertiesCfg(contact_offset=0.005, rest_offset=0.0),
++        ),
++        init_state=ArticulationCfg.InitialStateCfg(
++            pos=(0.0, 0.4, 0.1), rot=(1.0, 0.0, 0.0, 0.0), joint_pos={}, joint_vel={}
++        ),
++        actuators={},
++    )
+diff --git a/source/isaaclab_tasks/isaaclab_tasks/direct/factory/factory_utils.py b/source/isaaclab_tasks/isaaclab_tasks/direct/factory/factory_utils.py
+index 962b3872bf..396173bf23 100644
+--- a/source/isaaclab_tasks/isaaclab_tasks/direct/factory/factory_utils.py
++++ b/source/isaaclab_tasks/isaaclab_tasks/direct/factory/factory_utils.py
+@@ -37,6 +37,17 @@ def set_friction(asset, value, num_envs):
+     asset.root_physx_view.set_material_properties(materials, env_ids)
+ 
+ 
++def set_friction_per_env(asset, values, num_envs):
++    """Set per-env friction (values: tensor/list of length num_envs). Used for friction DR."""
++    materials = asset.root_physx_view.get_material_properties()
++    # materials[..., 0] has shape (num_envs, num_shapes); reshape to (num_envs, 1) to broadcast.
++    v = torch.as_tensor(values, dtype=materials.dtype).reshape(num_envs, 1)
++    materials[..., 0] = v  # Static friction (broadcast over shapes).
++    materials[..., 1] = v  # Dynamic friction.
++    env_ids = torch.arange(num_envs, device="cpu")
++    asset.root_physx_view.set_material_properties(materials, env_ids)
++
++
+ def set_body_inertias(robot, num_envs):
+     """Note: this is to account for the asset_options.armature parameter in IGE."""
+     inertias = robot.root_physx_view.get_inertias()
+diff --git a/source/isaaclab_tasks/isaaclab_tasks/direct/forge/__init__.py b/source/isaaclab_tasks/isaaclab_tasks/direct/forge/__init__.py
+index 6532e3c3b6..4752b9d88a 100644
+--- a/source/isaaclab_tasks/isaaclab_tasks/direct/forge/__init__.py
++++ b/source/isaaclab_tasks/isaaclab_tasks/direct/forge/__init__.py
+@@ -21,6 +21,66 @@ gym.register(
+     },
+ )
+ 
++gym.register(
++    id="Isaac-Forge-PegInsertBlind-Direct-v0",
++    entry_point=f"{__name__}.forge_env:ForgeEnv",
++    disable_env_checker=True,
++    kwargs={
++        "env_cfg_entry_point": f"{__name__}.forge_env_cfg:ForgeTaskPegInsertBlindCfg",
++        "rl_games_cfg_entry_point": f"{agents.__name__}:rl_games_ppo_cfg.yaml",
++    },
++)
++
++gym.register(
++    id="Isaac-Forge-PegInsertRPTilt-Direct-v0",
++    entry_point=f"{__name__}.forge_env:ForgeEnv",
++    disable_env_checker=True,
++    kwargs={
++        "env_cfg_entry_point": f"{__name__}.forge_env_cfg:ForgeTaskPegInsertRPTiltCfg",
++        "rl_games_cfg_entry_point": f"{agents.__name__}:rl_games_ppo_cfg_rptilt.yaml",
++    },
++)
++
++gym.register(
++    id="Isaac-Forge-PegSearchMap-Direct-v0",
++    entry_point=f"{__name__}.forge_env:ForgeEnv",
++    disable_env_checker=True,
++    kwargs={
++        "env_cfg_entry_point": f"{__name__}.forge_env_cfg:ForgeTaskPegSearchMapCfg",
++        "rl_games_cfg_entry_point": f"{agents.__name__}:rl_games_ppo_cfg.yaml",
++    },
++)
++
++gym.register(
++    id="Isaac-Forge-PegSearchMapDR-Direct-v0",
++    entry_point=f"{__name__}.forge_env:ForgeEnv",
++    disable_env_checker=True,
++    kwargs={
++        "env_cfg_entry_point": f"{__name__}.forge_env_cfg:ForgeTaskPegSearchMapDRCfg",
++        "rl_games_cfg_entry_point": f"{agents.__name__}:rl_games_ppo_cfg.yaml",
++    },
++)
++
++gym.register(
++    id="Isaac-Forge-PegInsertBlindDR-Direct-v0",
++    entry_point=f"{__name__}.forge_env:ForgeEnv",
++    disable_env_checker=True,
++    kwargs={
++        "env_cfg_entry_point": f"{__name__}.forge_env_cfg:ForgeTaskPegInsertBlindDRCfg",
++        "rl_games_cfg_entry_point": f"{agents.__name__}:rl_games_ppo_cfg.yaml",
++    },
++)
++
++gym.register(
++    id="Isaac-Forge-PegInsertOracle-Direct-v0",
++    entry_point=f"{__name__}.forge_env:ForgeEnv",
++    disable_env_checker=True,
++    kwargs={
++        "env_cfg_entry_point": f"{__name__}.forge_env_cfg:ForgeTaskPegInsertOracleCfg",
++        "rl_games_cfg_entry_point": f"{agents.__name__}:rl_games_ppo_cfg_oracle.yaml",
++    },
++)
++
+ gym.register(
+     id="Isaac-Forge-GearMesh-Direct-v0",
+     entry_point=f"{__name__}.forge_env:ForgeEnv",
+diff --git a/source/isaaclab_tasks/isaaclab_tasks/direct/forge/agents/rl_games_ppo_cfg_oracle.yaml b/source/isaaclab_tasks/isaaclab_tasks/direct/forge/agents/rl_games_ppo_cfg_oracle.yaml
+new file mode 100644
+index 0000000000..ff10ff4606
+--- /dev/null
++++ b/source/isaaclab_tasks/isaaclab_tasks/direct/forge/agents/rl_games_ppo_cfg_oracle.yaml
+@@ -0,0 +1,130 @@
++# Copyright (c) 2022-2026, The Isaac Lab Project Developers (https://github.com/isaac-sim/IsaacLab/blob/main/CONTRIBUTORS.md).
++# All rights reserved.
++#
++# SPDX-License-Identifier: BSD-3-Clause
++#
++# E5a Oracle-Actor rl_games config. IDENTICAL architecture/hyperparameters to
++# rl_games_ppo_cfg.yaml (asymmetric actor-critic, LSTM, central_value). ONLY the
++# output identity differs so this run NEVER touches the F2 checkpoint:
++#   config.name            : Forge -> ForgeOracle   (=> logs/rl_games/ForgeOracle/...)
++#   config.full_experiment_name : test -> oracle_e5a
++# F2 lives at logs/rl_games/Forge/test/nn/Forge.pth and is untouched by this run.
++
++params:
++  seed: 0
++  algo:
++    name: a2c_continuous
++
++  env:
++    clip_actions: 1.0
++
++  model:
++    name: continuous_a2c_logstd
++
++  network:
++    name: actor_critic
++    separate: False
++
++    space:
++      continuous:
++        mu_activation: None
++        sigma_activation: None
++        mu_init:
++          name: default
++        sigma_init:
++          name: const_initializer
++          val: 0
++        fixed_sigma: False
++    mlp:
++      units: [512, 128, 64]
++      activation: elu
++      d2rl: False
++
++      initializer:
++        name: default
++      regularizer:
++        name: None
++
++    rnn:
++      name: lstm
++      units: 1024
++      layers: 2
++      before_mlp: True
++      concat_input: True
++      layer_norm: True
++
++  load_checkpoint: False
++  load_path: ""
++
++  config:
++    name: ForgeOracle
++    device: cuda:0
++    full_experiment_name: oracle_e5a
++    env_name: rlgpu
++    multi_gpu: False
++    ppo: True
++    mixed_precision: True
++    normalize_input: True
++    normalize_value: True
++    value_bootstrap: True
++    num_actors: 128
++    reward_shaper:
++      scale_value: 1.0
++    normalize_advantage: True
++    gamma: 0.995
++    tau: 0.95
++    learning_rate: 1.0e-4
++    lr_schedule: adaptive
++    schedule_type: standard
++    kl_threshold: 0.008
++    score_to_win: 20000
++    max_epochs: 200
++    save_best_after: 10
++    save_frequency: 100
++    print_stats: True
++    grad_norm: 1.0
++    entropy_coef: 0.0
++    truncate_grads: True
++    e_clip: 0.2
++    horizon_length: 128
++    minibatch_size: 512  # batch size = num_envs * horizon_length; minibatch_size = batch_size / num_minibatches
++    mini_epochs: 4
++    critic_coef: 2
++    clip_value: True
++    seq_length: 128
++    bounds_loss_coef: 0.0001
++
++    central_value_config:
++      minibatch_size: 512
++      mini_epochs: 4
++      learning_rate: 1e-4
++      lr_schedule: adaptive
++      kl_threshold: 0.008
++      clip_value: True
++      normalize_input: True
++      truncate_grads: True
++
++      network:
++        name: actor_critic
++        central_value: True
++
++        mlp:
++          units: [512, 128, 64]
++          activation: elu
++          d2rl: False
++
++          initializer:
++            name: default
++          regularizer:
++            name: None
++
++        rnn:
++          name: lstm
++          units: 1024
++          layers: 2
++          before_mlp: True
++          concat_input: True
++          layer_norm: True
++
++    player:
++      deterministic: False
+diff --git a/source/isaaclab_tasks/isaaclab_tasks/direct/forge/agents/rl_games_ppo_cfg_rptilt.yaml b/source/isaaclab_tasks/isaaclab_tasks/direct/forge/agents/rl_games_ppo_cfg_rptilt.yaml
+new file mode 100644
+index 0000000000..63b5a1791d
+--- /dev/null
++++ b/source/isaaclab_tasks/isaaclab_tasks/direct/forge/agents/rl_games_ppo_cfg_rptilt.yaml
+@@ -0,0 +1,123 @@
++# Copyright (c) 2022-2026, The Isaac Lab Project Developers (https://github.com/isaac-sim/IsaacLab/blob/main/CONTRIBUTORS.md).
++# All rights reserved.
++#
++# SPDX-License-Identifier: BSD-3-Clause
++
++params:
++  seed: 0
++  algo:
++    name: a2c_continuous
++
++  env:
++    clip_actions: 1.0
++
++  model:
++    name: continuous_a2c_logstd
++
++  network:
++    name: actor_critic
++    separate: False
++
++    space:
++      continuous:
++        mu_activation: None
++        sigma_activation: None
++        mu_init:
++          name: default
++        sigma_init:
++          name: const_initializer
++          val: 0
++        fixed_sigma: False
++    mlp:
++      units: [512, 128, 64]
++      activation: elu
++      d2rl: False
++
++      initializer:
++        name: default
++      regularizer:
++        name: None
++
++    rnn:
++      name: lstm
++      units: 1024
++      layers: 2
++      before_mlp: True
++      concat_input: True
++      layer_norm: True
++
++  load_checkpoint: False
++  load_path: ""
++
++  config:
++    name: ForgeRPTilt
++    device: cuda:0
++    full_experiment_name: rptilt_e5b
++    env_name: rlgpu
++    multi_gpu: False
++    ppo: True
++    mixed_precision: True
++    normalize_input: True
++    normalize_value: True
++    value_bootstrap: True
++    num_actors: 128
++    reward_shaper:
++      scale_value: 1.0
++    normalize_advantage: True
++    gamma: 0.995
++    tau: 0.95
++    learning_rate: 1.0e-4
++    lr_schedule: adaptive
++    schedule_type: standard
++    kl_threshold: 0.008
++    score_to_win: 20000
++    max_epochs: 200
++    save_best_after: 10
++    save_frequency: 100
++    print_stats: True
++    grad_norm: 1.0
++    entropy_coef: 0.0
++    truncate_grads: True
++    e_clip: 0.2
++    horizon_length: 128
++    minibatch_size: 512  # batch size = num_envs * horizon_length; minibatch_size = batch_size / num_minibatches
++    mini_epochs: 4
++    critic_coef: 2
++    clip_value: True
++    seq_length: 128
++    bounds_loss_coef: 0.0001
++
++    central_value_config:
++      minibatch_size: 512
++      mini_epochs: 4
++      learning_rate: 1e-4
++      lr_schedule: adaptive
++      kl_threshold: 0.008
++      clip_value: True
++      normalize_input: True
++      truncate_grads: True
++
++      network:
++        name: actor_critic
++        central_value: True
++
++        mlp:
++          units: [512, 128, 64]
++          activation: elu
++          d2rl: False
++
++          initializer:
++            name: default
++          regularizer:
++            name: None
++
++        rnn:
++          name: lstm
++          units: 1024
++          layers: 2
++          before_mlp: True
++          concat_input: True
++          layer_norm: True
++
++    player:
++      deterministic: False
+diff --git a/source/isaaclab_tasks/isaaclab_tasks/direct/forge/forge_env.py b/source/isaaclab_tasks/isaaclab_tasks/direct/forge/forge_env.py
+index 75484cbd8f..26f39629cb 100644
+--- a/source/isaaclab_tasks/isaaclab_tasks/direct/forge/forge_env.py
++++ b/source/isaaclab_tasks/isaaclab_tasks/direct/forge/forge_env.py
+@@ -119,11 +119,13 @@ class ForgeEnv(FactoryEnv):
+ 
+         noisy_fixed_pos = self.fixed_pos_obs_frame + self.init_fixed_pos_obs_noise
+         prev_actions = self.actions.clone()
+-        prev_actions[:, 3:5] = 0.0
++        if not getattr(self.cfg, "free_roll_pitch", False):
++            prev_actions[:, 3:5] = 0.0
+ 
+         obs_dict.update(
+             {
+                 "fingertip_pos": self.noisy_fingertip_pos,
++                "fingertip_pos_rel_init": self.noisy_fingertip_pos - self.init_fingertip_anchor,
+                 "fingertip_pos_rel_fixed": self.noisy_fingertip_pos - noisy_fixed_pos,
+                 "fingertip_quat": self.noisy_fingertip_quat,
+                 "force_threshold": self.contact_penalty_thresholds[:, None],
+@@ -141,10 +143,78 @@ class ForgeEnv(FactoryEnv):
+             }
+         )
+ 
++        if getattr(self.cfg, "use_map_belief", False):
++            obs_dict["map_belief"] = self._map_belief_features()
++
++        if getattr(self.cfg, "use_oracle_obs", False):
++            # E5a Oracle-Actor: give the actor the true per-env friction as an extra channel.
++            # (True hole position is delivered via obs_rand.fixed_asset_pos=0, which makes the
++            # existing fingertip_pos_rel_fixed channel noise-free; no new channel needed there.)
++            obs_dict["true_mu"] = self._true_mu_feature()
++            if not getattr(self, "_oracle_debug_printed", False):
++                self._oracle_debug_printed = True
++                mu = obs_dict["true_mu"]
++                pos_noise_absmax = self.init_fixed_pos_obs_noise.abs().max().item()
++                print(
++                    f"ORACLE_DEBUG obs_order={list(self.cfg.obs_order)} "
++                    f"true_mu[min/mean/max]=[{mu.min().item():.4f}/{mu.mean().item():.4f}/{mu.max().item():.4f}] "
++                    f"true_mu_n_unique={int(torch.unique(mu).numel())} "
++                    f"init_fixed_pos_obs_noise_absmax={pos_noise_absmax:.6e} (0 => hole-pos oracle active)",
++                    flush=True,
++                )
++
+         obs_tensors = factory_utils.collapse_obs_dict(obs_dict, self.cfg.obs_order + ["prev_actions"])
+         state_tensors = factory_utils.collapse_obs_dict(state_dict, self.cfg.state_order + ["prev_actions"])
+         return {"policy": obs_tensors, "critic": state_tensors}
+ 
++    def _true_mu_feature(self):
++        """E5a Oracle-Actor: per-env true contact friction as a [B,1] observation channel.
++
++        When friction domain randomization is active (cfg.friction_dr_range set), the sim
++        applies a per-env log-uniform mu stored as ``self._dr_friction_values``
++        (see factory_env._set_default_dynamics_parameters). We expose exactly that value.
++        When DR is off (e.g. eval with a fixed --mu), we fall back to the scalar
++        ``held_asset_cfg.friction`` the sim actually applies. Cached on first call
++        (friction is fixed for the whole run in both paths). rl_games normalize_input
++        handles scaling of the raw mu value.
++        """
++        if not hasattr(self, "_true_mu_obs"):
++            dr = getattr(self, "_dr_friction_values", None)
++            if dr is not None:
++                mu = dr.to(self.device).float().view(-1, 1)
++            else:
++                mu_val = float(self.cfg_task.held_asset_cfg.friction)
++                mu = torch.full((self.num_envs, 1), mu_val, device=self.device)
++            self._true_mu_obs = mu
++        return self._true_mu_obs
++
++    def _map_belief_features(self):
++        """案C: 接触時の沈み量をCADマップ尤度でベイズ更新した穴位置の信念特徴 [B,4]。
++        真の穴位置は方策へ渡さない（信念の元は接触観測のみ）。v1の近似: ペグ先端は真値
++        (held_base_pos)＝把持オフセット既知を仮定。θ=0スライスのマップ尤度。"""
++        if not hasattr(self, "_belief"):
++            import sys
++            if self.cfg.map_module_dir not in sys.path:
++                sys.path.append(self.cfg.map_module_dir)
++            from belief_estimator import BeliefEstimator
++            self._belief = BeliefEstimator(
++                self.cfg.map_npz_path, self.num_envs, device=str(self.device),
++                residual_npz=getattr(self.cfg, "belief_residual_npz", None),
++                oracle_mu=getattr(self.cfg, "belief_oracle_mu", None),
++            )
++        held_base_pos, _ = factory_utils.get_held_base_pose(
++            self.held_pos, self.held_quat, self.cfg_task.name, self.cfg_task.fixed_asset_cfg,
++            self.num_envs, self.device,
++        )
++        peg_xy_mm = (held_base_pos[:, 0:2] - self.init_fingertip_anchor[:, 0:2]) * 1000.0
++        opening_z = self.fixed_pos[:, 2] + self.cfg_task.fixed_asset_cfg.height
++        depth_mm = (held_base_pos[:, 2] - opening_z) * 1000.0
++        f_mag = torch.linalg.vector_norm(self.force_sensor_smooth[:, 0:3], dim=1)
++        contact = f_mag > self.cfg.belief_contact_force_n
++        self._belief.update(peg_xy_mm, depth_mm, mask=contact)
++        self._last_belief_debug = (peg_xy_mm, depth_mm, f_mag, contact)  # smoke検証用
++        return self._belief.features(peg_xy_mm)
++
+     def _apply_action(self):
+         """FORGE actions are defined as targets relative to the fixed asset."""
+         if self.last_update_timestamp < self._robot._data._sim_timestamp:
+@@ -162,7 +232,11 @@ class ForgeEnv(FactoryEnv):
+         fixed_pos_action_frame = self.fixed_pos_obs_frame + self.init_fixed_pos_obs_noise
+         ctrl_target_fingertip_preclipped_pos = fixed_pos_action_frame + pos_actions
+         # (1.b) Enforce rotation action constraints.
+-        rot_actions[:, 0:2] = 0.0
++        # E5b: when free_roll_pitch is set (RPTilt task only), roll/pitch commands are NOT
++        # zeroed, so the policy can command tilt. Per-step change is still clipped by
++        # rot_threshold (~0.097 rad) at step (2.b.iv). Existing tasks keep the flag False.
++        if not getattr(self.cfg, "free_roll_pitch", False):
++            rot_actions[:, 0:2] = 0.0
+ 
+         # Assumes joint limit is in (+x, -y)-quadrant of world frame.
+         rot_actions[:, 2] = np.deg2rad(-180.0) + np.deg2rad(270.0) * (rot_actions[:, 2] + 1.0) / 2.0  # Joint limit.
+@@ -273,8 +347,21 @@ class ForgeEnv(FactoryEnv):
+         """Perform additional randomizations."""
+         super()._reset_idx(env_ids)
+ 
++        # Episode-start fingertip anchor (blind variant reference frame).
++        if not hasattr(self, "init_fingertip_anchor"):
++            self.init_fingertip_anchor = self.fingertip_midpoint_pos.clone()
++        else:
++            self.init_fingertip_anchor[env_ids] = self.fingertip_midpoint_pos[env_ids]
++
++        if getattr(self.cfg, "use_map_belief", False) and hasattr(self, "_belief"):
++            self._belief.reset(env_ids)
++
+         # Compute initial action for correct EMA computation.
+         fixed_pos_action_frame = self.fixed_pos_obs_frame + self.init_fixed_pos_obs_noise
++        if getattr(self.cfg, "blind_anchor", False):
++            # Blind variant: init prev_actions relative to the anchor (=0), otherwise the
++            # hole-relative offset leaks into the observation via prev_actions at reset.
++            fixed_pos_action_frame = self.init_fingertip_anchor
+         pos_actions = self.fingertip_midpoint_pos - fixed_pos_action_frame
+         pos_action_bounds = torch.tensor(self.cfg.ctrl.pos_action_bounds, device=self.device)
+         pos_actions = pos_actions @ torch.diag(1.0 / pos_action_bounds)
+@@ -298,6 +385,9 @@ class ForgeEnv(FactoryEnv):
+         yaw_action = (fingertip_yaw_bolt + np.deg2rad(180.0)) / np.deg2rad(270.0) * 2.0 - 1.0
+         self.actions[:, 5] = self.prev_actions[:, 5] = yaw_action
+         self.actions[:, 6] = self.prev_actions[:, 6] = -1.0
++        if getattr(self.cfg, "free_roll_pitch", False):
++            # Neutral tilt at episode start (upright hand); avoids stale roll/pitch actions.
++            self.actions[:, 3:5] = self.prev_actions[:, 3:5] = 0.0
+ 
+         # EMA randomization.
+         ema_rand = torch.rand((self.num_envs, 1), dtype=torch.float32, device=self.device)
+diff --git a/source/isaaclab_tasks/isaaclab_tasks/direct/forge/forge_env_cfg.py b/source/isaaclab_tasks/isaaclab_tasks/direct/forge/forge_env_cfg.py
+index 5da73aa2ae..0f650d7ba5 100644
+--- a/source/isaaclab_tasks/isaaclab_tasks/direct/forge/forge_env_cfg.py
++++ b/source/isaaclab_tasks/isaaclab_tasks/direct/forge/forge_env_cfg.py
+@@ -13,9 +13,9 @@ from isaaclab_tasks.direct.factory.factory_env_cfg import OBS_DIM_CFG, STATE_DIM
+ from .forge_events import randomize_dead_zone
+ from .forge_tasks_cfg import ForgeGearMesh, ForgeNutThread, ForgePegInsert, ForgeTask
+ 
+-OBS_DIM_CFG.update({"force_threshold": 1, "ft_force": 3})
++OBS_DIM_CFG.update({"force_threshold": 1, "ft_force": 3, "true_mu": 1})
+ 
+-STATE_DIM_CFG.update({"force_threshold": 1, "ft_force": 3})
++STATE_DIM_CFG.update({"force_threshold": 1, "ft_force": 3, "true_mu": 1})
+ 
+ 
+ @configclass
+@@ -136,6 +136,159 @@ class ForgeTaskPegInsertCfg(ForgeEnvCfg):
+     episode_length_s = 10.0
+ 
+ 
++@configclass
++class ForgeTaskPegInsertRPTiltCfg(ForgeTaskPegInsertCfg):
++    """E5b roll/pitch-freed variant: the policy MAY command tilt (roll/pitch).
++
++    Baseline FORGE PegInsert zeroes roll/pitch action components
++    (``rot_actions[:, 0:2] = 0.0``) and hides them from the observed prev_actions
++    (``prev_actions[:, 3:5] = 0.0``), locking the peg upright. This variant sets
++    ``free_roll_pitch=True`` so ``forge_env`` skips both suppressions, letting the
++    actor issue tilt commands and observe its own prior tilt. Per-step tilt change
++    is still clipped by ``rot_action_threshold`` (~0.097 rad/step) in the existing
++    orientation-clip machinery (step 2.b.iv). Everything else (assets, obs channels,
++    reward, hole info) is identical to ForgeTaskPegInsertCfg. Existing tasks keep
++    the flag False (default) and are byte-for-byte unaffected.
++
++    Note: the action penalty term only uses delta_yaw (rot_error), so roll/pitch
++    commands are not directly penalized; keypoint/success reward is unchanged.
++    """
++
++    free_roll_pitch: bool = True
++
++
++@configclass
++class ForgeTaskPegInsertBlindCfg(ForgeTaskPegInsertCfg):
++    """Blind (post-contact) variant: actor does NOT observe hole-relative position.
++
++    Reference frame is the episode-start fingertip anchor (models "after touch-down,
++    displacement from the touch point is known via encoders; the hole is somewhere
++    within +/-3mm of it"). Three hole-information channels are closed:
++    - obs: fingertip_pos_rel_fixed -> fingertip_pos_rel_init (anchor-relative).
++      Critic state_order unchanged (asymmetric actor-critic; reward uses true state).
++    - action clip box: anchored at init anchor, not the hole frame (blind_anchor).
++    - prev_actions EMA init at reset: relative to anchor (=0), not hole offset.
++    """
++
++    blind_anchor: bool = True
++
++    obs_order: list = [
++        "fingertip_pos_rel_init",
++        "fingertip_quat",
++        "ee_linvel",
++        "ee_angvel",
++        "ft_force",
++        "force_threshold",
++    ]
++
++    def __post_init__(self):
++        self.task.hand_init_pos_noise = [0.003, 0.003, 0.01]
++
++
++@configclass
++class ForgeTaskPegSearchMapCfg(ForgeTaskPegInsertBlindCfg):
++    """案C: map-informed 能動サーチ。盲目設計(穴位置非開示・アンカー相対・リーク3チャネル閉鎖)に、
++    CAD由来 z_contact マップを観測モデルにした穴位置の信念特徴(map_belief 4dim)を追加する。
++
++    - 方策が受け取るのは信念（穴方向・距離・エントロピー）のみ。真の穴位置は渡さない。
++      信念は接触時の沈み量観測をマップ尤度でベイズ更新して得る＝「答え」でなく「解釈モデル」。
++    - critic は従来通り全状態（非対称 actor-critic）。
++    """
++
++    use_map_belief: bool = True
++    map_npz_path: str = "D:/IsaacStack/peg_demo/cspace_4d_forge8mm.npz"
++    map_module_dir: str = "D:/IsaacStack/peg_demo"
++    belief_contact_force_n: float = 1.0  # 接触ゲート閾値 [N]
++    # 残差観測モデル（P-f〜P-i・評価時に設定）: residual_table.npz / μ真値オラクル
++    belief_residual_npz: str | None = None
++    belief_oracle_mu: float | None = None
++
++    obs_order: list = [
++        "fingertip_pos_rel_init",
++        "fingertip_quat",
++        "ee_linvel",
++        "ee_angvel",
++        "ft_force",
++        "force_threshold",
++        "map_belief",
++    ]
++
++
++@configclass
++class ForgeTaskPegSearchMapDRCfg(ForgeTaskPegSearchMapCfg):
++    """自動獲得テスト（2x2の未実施マス）: C(belief)×摩擦DR。
++    経験(DR)+解釈の道具(belief)だけを与え、低μで探れる動作が自動で出るかを見る。
++    手設計の観測チャネル・動作プリミティブは足さない。"""
++
++    friction_dr_range: tuple = (0.05, 1.0)
++
++
++@configclass
++class ForgeTaskPegInsertBlindDRCfg(ForgeTaskPegInsertBlindCfg):
++    """Blind variant + friction domain randomization.
++
++    Same blind observation/anchor design as ForgeTaskPegInsertBlindCfg, but contact
++    friction is sampled per-env log-uniformly over friction_dr_range (held==fixed==mu),
++    fixed for the whole run. Tests whether experiencing a mu-range during training makes
++    the blind policy robust to mu-shift at eval time.
++    """
++
++    friction_dr_range: tuple = (0.05, 1.0)
++
++
++@configclass
++class ForgeTaskPegInsertOracleCfg(ForgeTaskPegInsertCfg):
++    """E5a Oracle-Actor variant: the ACTOR observes privileged (map/oracle) information.
++
++    Purpose (plan 11, E5a): re-train FORGE PegInsert with the actor given the two
++    normally-hidden latent variables, to measure the success-rate ceiling of injecting
++    CAD-map-derived knowledge as an actor observation. Two oracle channels are added to
++    the ACTOR observation (the critic already sees full state; asymmetric actor-critic):
++
++    - True hole position (position noise sigma = 0): implemented purely by cfg, setting
++      ``obs_rand.fixed_asset_pos = [0, 0, 0]`` in ``__post_init__``. This zeroes
++      ``init_fixed_pos_obs_noise`` so the EXISTING actor channel ``fingertip_pos_rel_fixed``
++      (= noisy_fingertip_pos - (fixed_pos_obs_frame + init_fixed_pos_obs_noise)) becomes the
++      NOISE-FREE hole-relative position. No new obs channel / no obs_dim change for position.
++      (The action target frame also becomes the true hole, as at E3 pos-oracle eval.)
++    - True friction mu: a NEW 1-dim actor obs channel ``true_mu`` (added to OBS_DIM_CFG and to
++      obs_order below), carrying the per-env contact friction that the sim actually applies.
++      To make this channel INFORMATIVE (a constant channel would be a degenerate oracle),
++      friction is domain-randomized per env via ``friction_dr_range`` (same mechanism/range as
++      F7/E5b: log-uniform over [0.05, 1.0], held==fixed==mu). ``forge_env._true_mu_feature``
++      reads ``_dr_friction_values`` (or the fixed ``held_asset_cfg.friction`` when DR is off,
++      e.g. at eval time with a fixed --mu).
++
++    ``use_oracle_obs=True`` gates the ``true_mu`` channel construction in ``forge_env``.
++    Existing tasks keep ``use_oracle_obs`` False (default) and are byte-for-byte unaffected;
++    the branch only fires for this new task id.
++
++    Design note (flagged for the launcher): whether the ceiling should be measured with
++    mu domain-randomized (as here, so ``true_mu`` is informative) or at fixed mu=0.75
++    (matching the E0 baseline cell, where ``true_mu`` degenerates to a constant) is an
++    experimental-design choice; a fixed-mu variant is obtainable by subclassing with
++    ``friction_dr_range=None``.
++    """
++
++    use_oracle_obs: bool = True
++    friction_dr_range: tuple = (0.05, 1.0)
++
++    obs_order: list = [
++        "fingertip_pos_rel_fixed",
++        "fingertip_quat",
++        "ee_linvel",
++        "ee_angvel",
++        "ft_force",
++        "force_threshold",
++        "true_mu",
++    ]
++
++    def __post_init__(self):
++        # Position oracle: zero the episode-fixed hole-position observation noise (sigma=0),
++        # so the actor's fingertip_pos_rel_fixed channel is the true hole-relative position.
++        self.obs_rand.fixed_asset_pos = [0.0, 0.0, 0.0]
++
++
+ @configclass
+ class ForgeTaskGearMeshCfg(ForgeEnvCfg):
+     task_name = "gear_mesh"

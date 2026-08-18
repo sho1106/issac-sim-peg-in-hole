@@ -1,0 +1,126 @@
+diff --git a/source/tacex_tasks/tacex_tasks/factory/factory_env.py b/source/tacex_tasks/tacex_tasks/factory/factory_env.py
+index b9baafa..153723a 100644
+--- a/source/tacex_tasks/tacex_tasks/factory/factory_env.py
++++ b/source/tacex_tasks/tacex_tasks/factory/factory_env.py
+@@ -31,6 +31,14 @@ class FactoryEnv(DirectRLEnv):
+         cfg.state_space = sum([STATE_DIM_CFG[state] for state in cfg.state_order])
+         cfg.observation_space += cfg.action_space
+         cfg.state_space += cfg.action_space
++        # [peg-in-hole plan22 2026-08-04] 触覚を観測へ足した分の次元を宣言に反映する。
++        # 両指 RGB=6ch を 32/pool ごとに平均プーリング → (32/pool)^2 * 6
++        if getattr(cfg, "tactile_in_obs", False):
++            side = 32 // int(getattr(cfg, "tactile_pool", 4))
++            cfg.observation_space += side * side * 6
++        # [peg-in-hole plan24 2026-08-10] L2b: 真の穴位置誤差 δ（3次元）を方策観測へ足した分
++        if getattr(cfg, "oracle_delta_in_obs", False):
++            cfg.observation_space += 3
+         self.cfg_task = cfg.task
+ 
+         super().__init__(cfg, render_mode, **kwargs)
+@@ -260,6 +268,15 @@ class FactoryEnv(DirectRLEnv):
+         self.keypoint_dist = torch.norm(self.keypoints_held - self.keypoints_fixed, p=2, dim=-1).mean(-1)
+         self.last_update_timestamp = self._robot._data._sim_timestamp
+ 
++    def _get_tactile_obs(self):
++        """[peg-in-hole plan22] 両指の tactile_rgb を [N, 32, 32, 6] に連結して返す。
++
++        センサ出力は [N, H, W, 3]。左右をチャンネル方向に並べる（左 0-2 / 右 3-5）。
++        """
++        left = self.gsmini_left.data.output["tactile_rgb"]
++        right = self.gsmini_right.data.output["tactile_rgb"]
++        return torch.cat([left, right], dim=-1)
++
+     def _get_observations(self):
+         """Get actor/critic inputs using asymmetric critic."""
+         noisy_fixed_pos = self.fixed_pos_obs_frame + self.init_fixed_pos_obs_noise
+@@ -294,9 +311,35 @@ class FactoryEnv(DirectRLEnv):
+         }
+         obs_tensors = [obs_dict[obs_name] for obs_name in self.cfg.obs_order + ["prev_actions"]]
+         obs_tensors = torch.cat(obs_tensors, dim=-1)
++
++        # --- [peg-in-hole plan22 2026-08-04] 触覚観測（既存19次元は不変のまま後ろに連結） ---
++        tactile_raw = None
++        if getattr(self.cfg, "tactile_in_obs", False):
++            pool = int(getattr(self.cfg, "tactile_pool", 4))
++            side = 32 // pool
++            if getattr(self.cfg, "tactile_placebo", False):
++                # [plan22 5.5] 同じ次元・同じスケールの無情報ノイズ（実測 mean 0.4495 / std 0.1126）
++                extra = torch.normal(0.4495, 0.1126,
++                                     size=(self.num_envs, side * side * 6), device=self.device)
++            else:
++                tactile_raw = self._get_tactile_obs()          # [N, 32, 32, 6]
++                # [N,H,W,C] -> [N,C,H,W] で平均プーリングしてから平坦化
++                pooled = torch.nn.functional.avg_pool2d(tactile_raw.permute(0, 3, 1, 2), kernel_size=pool)
++                extra = pooled.reshape(self.num_envs, -1)
++            obs_tensors = torch.cat([obs_tensors, extra], dim=-1)
++
++        # --- [peg-in-hole plan24 2026-08-10] L2b オラクル δ（既存次元の並びは不変・末尾に連結） ---
++        # `init_fixed_pos_obs_noise` は観測ノイズであると同時に行動フレームのずれでもある（plan24 P6）。
++        # policy にだけ足す。critic は元から真値を持つので変更しない。
++        if getattr(self.cfg, "oracle_delta_in_obs", False):
++            obs_tensors = torch.cat([obs_tensors, self.init_fixed_pos_obs_noise], dim=-1)
++
+         state_tensors = [state_dict[state_name] for state_name in self.cfg.state_order + ["prev_actions"]]
+         state_tensors = torch.cat(state_tensors, dim=-1)
+-        return {"policy": obs_tensors, "critic": state_tensors}
++        out = {"policy": obs_tensors, "critic": state_tensors}
++        if tactile_raw is not None and getattr(self.cfg, "tactile_raw_key", False):
++            out["tactile"] = tactile_raw          # [peg-in-hole plan22] (b) CNN 版用
++        return out
+ 
+     def _reset_buffers(self, env_ids):
+         """Reset buffers."""
+@@ -474,6 +517,12 @@ class FactoryEnv(DirectRLEnv):
+ 
+         rew_buf = self._update_rew_buf(curr_successes)
+ 
++        # [peg-in-hole plan22 2026-08-08] 評価用: **リセット前**のエピソード成功フラグを毎ステップ公開する。
++        # 既存の extras["successes"] は `if torch.any(self.reset_buf)` の下にあり、
++        # かつ step 内で自動リセットが走るため、外部から step 後に成功を数えると常に 0 になる。
++        # `ep_succeeded` は「このエピソードで一度でも成功したか」（_update_rew_buf で更新・_reset_idx で 0 クリア）。
++        self.extras["ep_succeeded_vec"] = self.ep_succeeded.clone()
++
+         # Only log episode success rates at the end of an episode.
+         if torch.any(self.reset_buf):
+             self.extras["successes"] = torch.count_nonzero(curr_successes) / self.num_envs
+diff --git a/source/tacex_tasks/tacex_tasks/factory/factory_env_cfg.py b/source/tacex_tasks/tacex_tasks/factory/factory_env_cfg.py
+index 8b1c317..28a8bd4 100644
+--- a/source/tacex_tasks/tacex_tasks/factory/factory_env_cfg.py
++++ b/source/tacex_tasks/tacex_tasks/factory/factory_env_cfg.py
+@@ -212,6 +212,36 @@ class FactoryEnvCfg(DirectRLEnvCfg):
+         prim_path="/World/envs/env_.*/Robot/gelsight_mini_case_right",
+     )
+ 
++    # --- [peg-in-hole plan22 2026-08-04] 触覚を方策の観測に入れる配線 -------------------
++    # 上流はセンサを持つだけで obs_order は固有感覚4種のみ＝触覚が方策に届いていない。
++    # 対照アーム（触覚なし）と完全に同じ policy 19次元を保つため、既存 obs_order は変更せず
++    # **別キーで足す**。触覚なし側もセンサは動かしたまま観測から外す（計算負荷を揃える）。
++    tactile_in_obs: bool = False
++    """True で両指の tactile_rgb を観測に加える（plan22 §2.1 凍結）。"""
++
++    tactile_pool: int = 4
++    """平均プーリングの縮小率。32/4 = 8 → 8*8*6 = 384 次元（plan22 §2.1 の (a) プーリング版）。"""
++
++    tactile_raw_key: bool = False
++    """True で生の [N,32,32,6] も `tactile` キーで返す（(b) CNN 版用・既定は返さない）。"""
++
++    tactile_placebo: bool = False
++    """[plan22 5.5] プラセボ対照。触覚と**同じ次元・同じスケール**の無情報ノイズを観測に足す。
++
++    触覚ありアームが対照より悪化した原因が「触覚の内容」なのか「観測次元が 19→403 と20倍に
++    増えたこと自体」なのかを切り分けるための第3アーム。実測した触覚の分布
++    （mean 0.4495 / std 0.1126・reports/tactile_peg_learning_raw_2026-08-05.md §5.4）に合わせる。
++    """
++
++    # --- [peg-in-hole plan24 2026-08-10] L2b オラクルアーム -----------------------------
++    oracle_delta_in_obs: bool = False
++    """True で**真の穴位置誤差 δ**（`init_fixed_pos_obs_noise`・3次元）を方策観測の末尾に足す。
++
++    plan24 §3 L2b。δ が完全に分かれば方策がずれた行動フレームを補正できるかを測る上限アーム。
++    既定 False＝既存アーム（対照・触覚・プラセボ）の観測を1ビットも変えない。
++    critic 側（`state_order`）は変更しない（critic は元から真値 `fixed_pos` を持つ）。
++    """
++
+ 
+ @configclass
+ class FactoryTaskPegInsertCfg(FactoryEnvCfg):

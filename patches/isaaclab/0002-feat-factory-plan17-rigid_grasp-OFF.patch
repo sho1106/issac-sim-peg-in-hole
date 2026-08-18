@@ -1,0 +1,115 @@
+From 5ce9c9db34b1f3a09bea7de72193e6d24ce7f19a Mon Sep 17 00:00:00 2001
+From: sho1106 <shota.ishikawa.1106@gmail.com>
+Date: Wed, 29 Jul 2026 08:03:58 +0900
+Subject: [PATCH 2/2] =?UTF-8?q?feat(factory):=20plan17=20=E6=8A=8A?=
+ =?UTF-8?q?=E6=8C=81=E5=9B=BA=E5=AE=9A=E3=82=A2=E3=83=96=E3=83=AC=E3=83=BC?=
+ =?UTF-8?q?=E3=82=B7=E3=83=A7=E3=83=B3=E7=94=A8=E3=81=AB=20rigid=5Fgrasp?=
+ =?UTF-8?q?=20=E3=83=95=E3=83=A9=E3=82=B0=E3=82=92=E8=BF=BD=E5=8A=A0(?=
+ =?UTF-8?q?=E6=97=A2=E5=AE=9AOFF)?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+ペグを panda_fingertip_centered へ UsdPhysics.FixedJoint で剛結し把持内滑りを除去する。
+clone_environments() の前に env_0 へ張って全envへ複製。静止相対姿勢は reset の把持配置と
+同じ公称値(並進 (0,0,height-fingerpad_length)・回転 Ry(180deg))で腕姿勢非依存の定数。
+
+スモーク実測(16env/60step/zero action): beta_slip中央値 0.0713deg(対照0.3165)・
+並進slip中央値0.066mm(対照0.269)でサニティ<0.1degを満たし、接触力は対照と同水準
+(|F|中央値7.27N/最大16.89N・>1N割合76.5%)＝力の伝達経路は壊れていない。
+
+既定Falseゆえ既存タスクの挙動は不変。peg_insert 以外は NotImplementedError。
+
+Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01CgnbpLiWbEm2UeaaYQuYFg
+---
+ .../direct/factory/factory_env.py             | 47 +++++++++++++++++++
+ .../direct/factory/factory_env_cfg.py         | 10 ++++
+ 2 files changed, 57 insertions(+)
+
+diff --git a/source/isaaclab_tasks/isaaclab_tasks/direct/factory/factory_env.py b/source/isaaclab_tasks/isaaclab_tasks/direct/factory/factory_env.py
+index 312aecb427..652f1a1e77 100644
+--- a/source/isaaclab_tasks/isaaclab_tasks/direct/factory/factory_env.py
++++ b/source/isaaclab_tasks/isaaclab_tasks/direct/factory/factory_env.py
+@@ -113,6 +113,10 @@ class FactoryEnv(DirectRLEnv):
+             self._small_gear_asset = Articulation(self.cfg_task.small_gear_cfg)
+             self._large_gear_asset = Articulation(self.cfg_task.large_gear_cfg)
+ 
++        # plan17: 把持固定アブレーション。clone 前に env_0 へ張る＝全 env へ複製される。
++        if getattr(self.cfg, "rigid_grasp", False):
++            self._author_grasp_weld()
++
+         self.scene.clone_environments(copy_from_source=False)
+         if self.device == "cpu":
+             # we need to explicitly filter collisions for CPU simulation
+@@ -129,6 +133,49 @@ class FactoryEnv(DirectRLEnv):
+         light_cfg = sim_utils.DomeLightCfg(intensity=2000.0, color=(0.75, 0.75, 0.75))
+         light_cfg.func("/World/Light", light_cfg)
+ 
++    def _author_grasp_weld(self):
++        """plan17: ペグを手先リンクへ固定ジョイントで剛結し、把持内滑り(β_slip)を除去する。
++
++        `clone_environments()` の**前に** env_0 のプリムへ張るので、全 env に複製される。
++        静止相対姿勢は reset の把持配置（`randomize_initial_state` (3) 節）と同じ公称値:
++        ペグ根本フレームは `panda_fingertip_centered` に対し
++        並進 (0, 0, height - fingerpad_length)・回転 Ry(180°)（= reset の flip_z_quat）。
++        これは腕姿勢に依存しない定数なので、物理を1ステップも回さずに確定できる。
++        """
++        import isaacsim.core.utils.stage as stage_utils
++        from pxr import Gf, Usd, UsdPhysics
++
++        if self.cfg_task.name != "peg_insert":
++            raise NotImplementedError(f"rigid_grasp is only derived for peg_insert (got {self.cfg_task.name})")
++
++        stage = stage_utils.get_current_stage()
++
++        parent_path = "/World/envs/env_0/Robot/panda_fingertip_centered"
++        parent_prim = stage.GetPrimAtPath(parent_path)
++        if not parent_prim.IsValid():
++            raise RuntimeError(f"rigid_grasp: parent body not found: {parent_path}")
++
++        # ペグ側の RigidBody プリムを探索（USD 内部構造をハードコードしない）
++        held_root = stage.GetPrimAtPath("/World/envs/env_0/HeldAsset")
++        if not held_root.IsValid():
++            raise RuntimeError("rigid_grasp: /World/envs/env_0/HeldAsset not found")
++        held_body = next((p for p in Usd.PrimRange(held_root) if p.HasAPI(UsdPhysics.RigidBodyAPI)), None)
++        if held_body is None:
++            raise RuntimeError("rigid_grasp: no RigidBodyAPI prim under HeldAsset")
++
++        offset_z = self.cfg_task.held_asset_cfg.height - self.cfg_task.robot_cfg.franka_fingerpad_length
++
++        joint = UsdPhysics.FixedJoint.Define(stage, "/World/envs/env_0/GraspWeld")
++        joint.CreateBody0Rel().SetTargets([parent_prim.GetPath()])
++        joint.CreateBody1Rel().SetTargets([held_body.GetPath()])
++        joint.CreateLocalPos0Attr().Set(Gf.Vec3f(0.0, 0.0, offset_z))
++        joint.CreateLocalRot0Attr().Set(Gf.Quatf(0.0, Gf.Vec3f(0.0, 1.0, 0.0)))  # Ry(180°)
++        joint.CreateLocalPos1Attr().Set(Gf.Vec3f(0.0, 0.0, 0.0))
++        joint.CreateLocalRot1Attr().Set(Gf.Quatf(1.0, Gf.Vec3f(0.0, 0.0, 0.0)))
++        joint.CreateExcludeFromArticulationAttr().Set(True)
++
++        print(f"[rigid_grasp] weld authored: {parent_path} <-> {held_body.GetPath()}  offset_z={offset_z:.6f}")
++
+     def _compute_intermediate_values(self, dt):
+         """Get values computed from raw tensors. This includes adding noise."""
+         # TODO: A lot of these can probably only be set once?
+diff --git a/source/isaaclab_tasks/isaaclab_tasks/direct/factory/factory_env_cfg.py b/source/isaaclab_tasks/isaaclab_tasks/direct/factory/factory_env_cfg.py
+index 5de80f3635..8be5b0b874 100644
+--- a/source/isaaclab_tasks/isaaclab_tasks/direct/factory/factory_env_cfg.py
++++ b/source/isaaclab_tasks/isaaclab_tasks/direct/factory/factory_env_cfg.py
+@@ -90,6 +90,16 @@ class FactoryEnvCfg(DirectRLEnvCfg):
+         "fixed_quat",
+     ]
+ 
++    # --- plan17 把持固定アブレーション（既定 False＝素の FORGE 条件・挙動不変） ---
++    rigid_grasp: bool = False
++    """True で held_asset を `panda_fingertip_centered` に固定ジョイントで剛結し、把持内滑り(β_slip)を除去する。
++
++    plan17（把持固定アブレーション）の単一因子操作。ジョイントは `_setup_scene()` で env_0 のプリムに
++    張ってから `clone_environments()` に複製させる＝静止相対姿勢は全 env 共通の公称把持姿勢になる。
++    ∴ **本フラグ有効時は把持オフセットのエピソード毎ランダム化が効かない**（ジョイントが引き戻す）。
++    対照条件と揃えるため、使用側で `held_asset_pos_noise=[0,0,0]` を両アームに設定すること。
++    """
++
+     task_name: str = "peg_insert"  # peg_insert, gear_mesh, nut_thread
+     task: FactoryTask = FactoryTask()
+     obs_rand: ObsRandCfg = ObsRandCfg()

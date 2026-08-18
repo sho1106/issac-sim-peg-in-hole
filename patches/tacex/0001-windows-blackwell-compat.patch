@@ -1,0 +1,122 @@
+diff --git a/scripts/reinforcement_learning/rl_games/train.py b/scripts/reinforcement_learning/rl_games/train.py
+index d842cc9..dd8d8ac 100644
+--- a/scripts/reinforcement_learning/rl_games/train.py
++++ b/scripts/reinforcement_learning/rl_games/train.py
+@@ -7,6 +7,14 @@
+ 
+ """Launch Isaac Sim Simulator first."""
+ 
++# [peg-in-hole plan22 2026-08-05] tacex_tasks は uipc 版タスクを条件付き登録するため、
++# Kit 起動後に uipc を import するとプロセスごと落ちる（PyInit_pyuipc で access violation・
++# knowledge/runbook-tacex-env.md §3.1）。AppLauncher より前に読んでおく。
++try:
++    import uipc as _uipc_preload  # noqa: F401
++except Exception:  # noqa: BLE001
++    pass
++
+ import argparse
+ import sys
+ from distutils.util import strtobool
+@@ -74,7 +82,9 @@ from isaaclab.envs import (
+ )
+ from isaaclab.utils.assets import retrieve_file_path
+ from isaaclab.utils.dict import print_dict
+-from isaaclab.utils.io import dump_pickle, dump_yaml
++# [peg-in-hole plan22 2026-08-05] IsaacLab 2.3.2 で isaaclab.utils.io.dump_pickle が削除された。
++# 用途は cfg のダンプのみなので dump_yaml で代替する（pickle 版は落とす）。
++from isaaclab.utils.io import dump_yaml
+ from isaaclab_rl.rl_games import RlGamesGpuEnv, RlGamesVecEnvWrapper
+ from isaaclab_tasks.utils.hydra import hydra_task_config
+ 
+@@ -136,8 +146,7 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
+     # dump the configuration into log-directory
+     dump_yaml(os.path.join(log_root_path, log_dir, "params", "env.yaml"), env_cfg)
+     dump_yaml(os.path.join(log_root_path, log_dir, "params", "agent.yaml"), agent_cfg)
+-    dump_pickle(os.path.join(log_root_path, log_dir, "params", "env.pkl"), env_cfg)
+-    dump_pickle(os.path.join(log_root_path, log_dir, "params", "agent.pkl"), agent_cfg)
++    # [peg-in-hole plan22] dump_pickle は 2.3.2 で削除（上記 import の注記参照）
+ 
+     # read configurations about the agent-training
+     rl_device = agent_cfg["params"]["config"]["device"]
+diff --git a/source/tacex/setup.py b/source/tacex/setup.py
+index e5932b4..cb993fc 100644
+--- a/source/tacex/setup.py
++++ b/source/tacex/setup.py
+@@ -20,10 +20,11 @@ INSTALL_REQUIRES = [
+     #     "torch_scatter @"
+     #     " https://data.pyg.org/whl/torch-2.5.0%2Bcu118/torch_scatter-2.1.2%2Bpt25cu118-cp310-cp310-linux_x86_64.whl"
+     # ),
+-    (  # needed for gpu taxim
+-        "torch_scatter @"
+-        "https://data.pyg.org/whl/torch-2.8.0%2Bcu128/torch_scatter-2.1.2%2Bpt28cu128-cp310-cp310-linux_x86_64.whl"
+-    ),
++    # [peg-in-hole port 2026-08-02] 元は torch-2.8.0+cu128 / cp310 / linux_x86_64 の直リンク固定で、
++    # Windows・python3.11・torch2.7 のこちらでは解決できない。torch_scatter は事前に
++    #   pip install torch-scatter -f https://data.pyg.org/whl/torch-2.7.0+cu128.html
++    # で入れる運用にし、ここでは OS/版に依存しない名前だけを要求する。
++    "torch_scatter",
+     # (  # needed for gpu taxim -> for Isaac 5.0
+     #     "torch_scatter @"
+     #     "https://data.pyg.org/whl/torch-2.8.0%2Bcu128/torch_scatter-2.1.2%2Bpt28cu128-cp311-cp311-linux_x86_64.whl"
+diff --git a/source/tacex_uipc/tacex_uipc/objects/uipc_object.py b/source/tacex_uipc/tacex_uipc/objects/uipc_object.py
+index 0c5db4c..ad74502 100644
+--- a/source/tacex_uipc/tacex_uipc/objects/uipc_object.py
++++ b/source/tacex_uipc/tacex_uipc/objects/uipc_object.py
+@@ -5,6 +5,8 @@
+ 
+ from __future__ import annotations
+ 
++import os
++
+ import torch
+ from collections.abc import Sequence
+ from typing import TYPE_CHECKING
+@@ -127,7 +129,13 @@ class UipcObject(AssetBase):
+ 
+         prim_paths_expr = self.cfg.prim_path  # + "/mesh"
+         print(f"Initializing uipc objects {prim_paths_expr}...")
+-        self._prim_view = XFormPrim(prim_paths_expr=prim_paths_expr, name=f"{prim_paths_expr}", usd=False)
++        # [peg-in-hole port 2026-08-03] usd=False (Fabric/warp path) crashes with an illegal
++        # memory access in get_world_poses -> _warp2backend when libuipc's CUDA context is live
++        # (measured on Isaac Sim 5.1 + RTX5080). Fall back to the USD path; set
++        # TACEX_UIPC_FABRIC=1 to restore the original Fabric path.
++        _use_fabric = os.environ.get("TACEX_UIPC_FABRIC") == "1"
++        self._prim_view = XFormPrim(prim_paths_expr=prim_paths_expr, name=f"{prim_paths_expr}",
++                                    usd=not _use_fabric)
+         self._prim_view.initialize()
+ 
+         self.stage = usdrt.Usd.Stage.Attach(omni.usd.get_context().get_stage_id())
+diff --git a/source/tacex_uipc/tacex_uipc/utils/mesh_gen.py b/source/tacex_uipc/tacex_uipc/utils/mesh_gen.py
+index 21a02b5..2491dc9 100644
+--- a/source/tacex_uipc/tacex_uipc/utils/mesh_gen.py
++++ b/source/tacex_uipc/tacex_uipc/utils/mesh_gen.py
+@@ -9,8 +9,11 @@ draw = _debug_draw.acquire_debug_draw_interface()
+ import numpy as np
+ import random
+ 
+-import wildmeshing as wm
+-
++# [peg-in-hole port 2026-08-02] wildmeshing は PyPI に win_amd64 wheel も sdist も無い
++# （`pip index versions wildmeshing` → No matching distribution / macosx+manylinux のみ）。
++# トップレベル import のままだと `import tacex_uipc` 自体が Windows で不可能になる
++# （utils/__init__.py → mesh_gen → wildmeshing）。実使用は MeshGenerator の四面体化1箇所だけなので
++# 遅延 import にして、事前生成の .msh を使う経路（spawn_from_msh）を Windows でも通す。
+ from isaaclab.utils import configclass
+ 
+ 
+@@ -138,6 +141,15 @@ class MeshGenerator:
+ 
+         # use Wildmeshing
+         # reference: https://github.com/wildmeshing/wildmeshing-python/blob/master/wildmeshing/runners.py
++        try:
++            import wildmeshing as wm
++        except ImportError as exc:  # [peg-in-hole port 2026-08-02] 上の注記を参照
++            raise ImportError(
++                "MeshGenerator は wildmeshing を要求するが、この環境には入っていない"
++                "（Windows には wheel が無い）。事前生成した .msh を spawn_from_msh 経由で使うか、"
++                "四面体化だけ Linux/WSL2 で行うこと。"
++            ) from exc
++
+         self.tetrahedralizer = wm.Tetrahedralizer(
+             stop_quality=self.cfg["stop_quality"],  # Specify max AMIPS energy for stopping mesh optimization"
+             max_its=self.cfg["max_its"],  # Max number of mesh optimization iterations
