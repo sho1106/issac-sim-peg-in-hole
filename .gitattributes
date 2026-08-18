@@ -1,0 +1,12 @@
+﻿# 改行コードを機械間で固定する（Windows/Linux をまたぐと差分が壊れるため）
+* text=auto eol=lf
+
+# PowerShell は CRLF が慣例。BOM 付き UTF-8 と併せて README 6.5 を参照
+*.ps1 text eol=crlf
+*.bat text eol=crlf
+
+# バイナリ
+*.png binary
+*.mp4 binary
+*.npz binary
+*.pth binary

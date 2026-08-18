@@ -1,0 +1,23 @@
+# 実行時の出力（再生成できるもの）
+results/
+# hydra が cwd に作る作業ディレクトリ
+outputs/
+*.log
+*.mp4
+*.npz
+*.pth
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.venv/
+
+# OS / エディタ
+Thumbs.db
+.DS_Store
+.vscode/
+
+# スクリプトが cwd 相対で書き出す作業ファイル
+*.csv

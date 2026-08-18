@@ -1,0 +1,25 @@
+# Isaac Lab 環境の「壊してはいけない」依存ピン（load-bearing constraints）
+# 将来 pip install するときは必ず -c を付けて torch(GPU版)/numpy<2/gymnasium を保護する:
+#   D:\IsaacStack\env_isaaclab\Scripts\python.exe -m pip install -c D:\IsaacStack\constraints.txt <pkg>
+#
+# 教訓: stable-baselines3 等が torch を CPU版(2.12)へ、--force-reinstall が numpy を 2.x へ
+# 巻き上げて GPU/Isaac を壊した。これらを固定する。完全なスナップショットは requirements.lock.txt。
+
+# --- GPU PyTorch スタック（CPU版へ巻き上げ厳禁。index は cu128）---
+torch==2.7.0+cu128
+torchvision==0.22.0+cu128
+torchaudio==2.7.0+cu128
+
+# --- isaacsim/isaaclab が要求する境界 ---
+numpy==1.26.0
+gymnasium==1.2.1
+
+# --- isaacsim-core / isaacsim-kernel の厳密ピン（ドリフトすると pip check 警告）---
+networkx==3.3
+sympy==1.13.3
+filelock==3.13.1
+fsspec==2024.6.1
+markupsafe==2.1.3
+psutil==5.9.8
+typing_extensions==4.12.2
+pillow==11.3.0
