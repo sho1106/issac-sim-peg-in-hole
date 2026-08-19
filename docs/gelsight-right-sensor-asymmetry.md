@@ -1,0 +1,189 @@
+# 右 GelSight の感度が低い件 — 原因はアセットの取り付け位置
+
+**結論**: TacEx 上流のロボットアセットで、**右のゲルパッドが 0.29mm ずれて取り付けられている**。
+Taxim の押し込み量の計算が左右共通の定数を使うため、このずれがそのまま感度差になる。
+**右センサの押し込み量は左の約 1/1.7、触覚画像の変動は約 1/2.9 になる。**
+
+調査日 2026-08-20。TacEx 上流 `adceed41` / Isaac Sim 5.1 / RTX 5080。
+
+---
+
+## 1. 症状
+
+触覚画像の時間方向の標準偏差（＝どれだけ変化したか）が左右で大きく違う。
+
+| データ | 条件 | 左 std | 右 std | 左/右 |
+|---|---|---|---|---|
+| `verify_on`（本リポジトリ） | arm=on・8env | 0.01693 | 0.00601 | 2.82 |
+| `lr_off_norender`（同上） | arm=off・8env | 0.01928 | 0.00676 | 2.85 |
+| `p27_collect_b0` | arm=on・128env・δseed100 | 0.02668 | 0.00767 | 3.48 |
+| `p27_collect_b1` | 同・δseed101 | 0.01157 | 0.00494 | 2.34 |
+| `p27_collect_b2` | 同・δseed102 | 0.01416 | 0.00547 | 2.59 |
+| `p27_collect_b3` | 同・δseed103 | 0.01000 | 0.00486 | 2.06 |
+
+**アームによらず一貫する**（触覚あり 2.82 / 触覚なし 2.85）。右の std は 0.0049〜0.0080 に張り付き、左だけが条件で 0.010〜0.027 と倍以上動く。
+
+右は死んではいない。ほぼ定数の画素は 0.00%、時間 std の最大 0.044、step 0 からの差の最大 0.151 で、接触に応じて像は変わっている。
+
+---
+
+## 2. 原因
+
+### 2.1 USD アセットの取り付けが非対称
+
+`Robots/Franka/GelSight_Mini/Gripper/physx_rigid_gelpads.usd` を直接読んで計測した。
+
+| プリム | 中点からの変位 [mm] | 対称性 |
+|---|---|---|
+| `gelsight_mini_case_left/right`（＝カメラ） | ±22.3945, ∓22.3944, ∓0.0013 | **1.3µm で鏡像対称** |
+| `gelpad_left/right` | ±5.3762, ∓5.3206, **∓0.2181** | **436µm ずれている** |
+
+カメラ座標系で見た gelpad 原点までの距離:
+
+```
+left  24.255 mm
+right 23.964 mm     ← 0.291 mm の差
+```
+
+**メッシュ自体は同一**（点数 10,248・bbox 16.67×16.67×25.25mm がどちらも一致）。形は同じで取り付け位置だけが違う。
+
+### 2.2 高さマップは深度をそのまま使う（補正なし）
+
+`tacex/gelsight_sensor.py`:
+
+```python
+self._data.output["height_map"][:] = self.camera.data.output["depth"][:, :, :, 0]
+self._data.output["height_map"] *= 1000          # m -> mm
+```
+
+per-sensor のキャリブレーションが無いので、幾何のずれがそのまま高さマップのオフセットになる。
+
+**実測で確認した**（`hm_probe_signals.npz`・arm=off・4env・150step）:
+
+```
+ゲル表面までの最短距離   left 27.8707 mm / right 28.1332 mm
+基準値の差 (right - left) = +0.2688 mm （初期）／ +0.2625 mm（平均）
+USD からの予測            =  0.291 mm
+```
+
+**大きさが 8% 以内で一致する。** 符号が反転するのはパッドが鏡像取り付けだから。
+
+### 2.3 Taxim の押し込み量が左右共通の定数を引く
+
+`tacex/simulation_approaches/gpu_taxim/taxim_sim.py`:
+
+```python
+dist_obj_sensor_case = min_distance_obj - self.cfg.gelpad_to_camera_min_distance
+dist_obj_sensor_case = torch.where(dist_obj_sensor_case < 0, 0, dist_obj_sensor_case)
+self._indentation_depth[:] = torch.where(
+    dist_obj_sensor_case <= self.cfg.gelpad_height,
+    (self.cfg.gelpad_height - dist_obj_sensor_case) * 1000, 0
+)
+```
+
+`gelpad_to_camera_min_distance = 24.0 mm`、`gelpad_height = 4.5 mm`。**どちらも左右共通の定数**で、実測の取り付け位置を反映しない。
+
+∴ `min_depth >= 28.5 mm` になると押し込み量は **0（接触なし）** に切り捨てられる。
+
+---
+
+## 3. 定量
+
+実測の高さマップに上の式を適用して再計算した。
+
+| | 最短距離 | dist_obj_case | 押し込み量 mean | 0 になった step | 境界 28.5mm までの余裕 |
+|---|---|---|---|---|---|
+| 左 | 27.8707 mm | 3.8707 mm | **0.6293 mm** | 0/150 | 0.6293 mm |
+| 右 | 28.1332 mm | 4.1332 mm | **0.3682 mm** | 2/150 | **0.3668 mm** |
+
+- 押し込み量の比 **left/right = 1.71**
+- 触覚画像の std の比は 2.88 — Taxim の描画が非線形なので 1.71 倍の入力差が 2.9 倍の出力差に増幅される
+- **右は境界まで 0.37mm しか余裕がない**。少し離れるだけで「接触なし」に落ちる
+
+### 反実仮想（決定的）
+
+右の高さマップから実測のオフセット 0.2688mm を引いて再計算する。
+
+```
+補正前  押し込み量 0.3682 mm   left/right = 1.71
+補正後  押し込み量 0.6356 mm   left/right = 0.990
+```
+
+**補正すると左右がほぼ完全に一致する（比 0.99）。** 0.29mm の取り付けずれだけで症状のすべてが説明できる。
+
+---
+
+## 4. 影響
+
+- **触覚 384 次元の観測のうち、右指ぶんの 192 次元が systematically 弱い。** 触覚を観測に入れた学習の結果を読むときは、これを前提にする必要がある
+- カメラ（render product）を作ると**右だけ 3.5 倍に化ける**（左 0.01928 のまま、右 0.00676 → 0.02337）。plan27 が記録した「カメラ生成で触覚画像が変わる」現象は主に右センサに効いている
+- 上流 TacEx のアセットの問題なので、**TacEx を使う全員に影響する**
+
+---
+
+## 5. 直し方（未実施）
+
+どれも上流の改変になるので、実施はユーザー裁定を待つ。
+
+| 案 | 内容 | 副作用 |
+|---|---|---|
+| A | USD の `gelpad_right` を 0.2181mm 動かして左と鏡像対称にする | アセット改変。過去の学習済み方策との整合が崩れる |
+| B | `gelpad_to_camera_min_distance` を左右で別の値にする（右は 24.269mm） | 浅いコピーの問題（§6）を先に直す必要がある |
+| C | センサごとに無接触時の基準を実測してキャリブレーションする | 実装量は多いが最も正しい |
+
+**既存の学習済みチェックポイントは、この非対称がある状態で学習されている。** 直すと分布が変わるので、直した環境で評価し直す必要がある。
+
+---
+
+## 6. 併せて見つかったコード上の問題
+
+`tacex_tasks/factory/factory_env_cfg.py`:
+
+```python
+gsmini_right = gsmini_left.replace(prim_path=".../gelsight_mini_case_right")
+```
+
+Isaac Lab の `configclass.replace()` の実体は `dataclasses.replace` で、**浅いコピー**。
+したがって `gsmini_right.sensor_camera_cfg` と `gsmini_right.optical_sim_cfg` は
+**`gsmini_left` と同一オブジェクト**になる。
+
+今回はセンサ側が読み取りしかしていないので実害は確認できていないが、
+片方の cfg を書き換えると両方に効く。§5 の案 B を採るならここを先に直す必要がある。
+
+---
+
+## 7. 未解決
+
+**プリムパスを入れ替える A/B は、きれいに切り分けられなかった。**
+
+```
+A 入れ替えなし: case_left 0.01955 / case_right 0.00678  （比 2.88）
+B 入れ替えあり: case_left 0.03164 / case_right 0.02418  （比 1.31）
+```
+
+入れ替えると両方の絶対値が上がった（右は 3.6 倍）。env 別に見ると各実行内では一貫している
+（A: 2.88/2.17/2.25/1.93、B: 0.76/0.83/0.76/0.85）ので、実行ごとのばらつきではない。
+
+§2–3 の因果は反実仮想まで含めて確立しているが、**この A/B の挙動は説明できていない**。
+描画経路の何かが効いている可能性があるが、未検証。
+
+---
+
+## 8. 再現手順
+
+```powershell
+# 高さマップを左右それぞれ記録する（scripts/exp_tacex/render_failure_cases.py に
+# hm_left / hm_right のログを足したもの。本リポジトリには診断用の改変は入れていない）
+$py = "D:\IsaacStack\env_tacex_isaac\Scripts\python.exe"
+& $py -u <改変版> --label hm_probe --arm off --num_envs 4 --steps 150 `
+    --delta_mode table --delta_seed 100 --seed 0 --no_render --log_raw_steps 150
+```
+
+USD の計測は Isaac を起動せずにできる（`pxr` があればよい）。
+
+```python
+from pxr import Usd, UsdGeom
+stage = Usd.Stage.Open(".../physx_rigid_gelpads.usd")
+# gelsight_mini_case_{left,right}/Camera と gelpad_{left,right} の
+# ComputeLocalToWorldTransform を比較する
+```
