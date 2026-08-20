@@ -154,13 +154,31 @@ peg. Its visible area is 11.39 % vs 17.32 %, and the centroid of the visible reg
 lateral peg offset only accounts for ~0.8 % of the field of view, so that does not explain a 5 px
 shift on its own.
 
+### One concrete thing that is not documented
+
+Independently of what causes the residual, there is a design premise that is not stated anywhere
+I could find:
+
+> **The midpoint of the two GelSight sensors does not coincide with `panda_fingertip_centered`.**
+
+It is off by **0.0822 mm** along the grip axis (measured identically on both machines). That is
+expected in hindsight — `panda_fingertip_centered` comes from the stock Franka, and the sensor
+cases were added on top — but the reset logic in `factory_env` places the held object
+analytically relative to `panda_fingertip_centered`, i.e. relative to a frame that is *not* the
+sensors' centre. Anything that assumes "the grasped object is centred between the two sensors"
+is therefore not exactly true, and there is no note saying so.
+
+Making this explicit in the docs (or re-centring the frame) would help regardless of the residual.
+
 ### Questions
 
 1. Is the 0.2954 mm gelpad offset in `physx_rigid_gelpads.usd` intentional (e.g. compensating
    for something), or an authoring artefact?
 2. Is there a known reason the two sensor cameras would frame the grasped object differently
    despite mirror-symmetric placement?
-3. Related: `gelsight_sensor.py:238` notes that `clipping range doesn't matter for existing
+3. Is the offset between the sensor midpoint and `panda_fingertip_centered` intended? Should
+   grasp construction use a sensor-centred frame instead?
+4. Related: `gelsight_sensor.py:238` notes that `clipping range doesn't matter for existing
    camera prim -> only applied when camera is spawned # TODO fix?`. The cameras in this asset are
    pre-authored, so the cfg's clipping range is ignored. Is that expected?
 
