@@ -271,7 +271,7 @@ cmd /c "$TACEX_PY -u scripts\exp_tacex\run_l0_l2a.py --layer L0 --cond cond_A --
 | `env.tactile_placebo` | 同じ次元・同じスケールの無情報ノイズに差し替える対照 |
 | `env.tactile_raw_key` | 生の `[N,32,32,6]` も `tactile` キーで返す（CNN 版用） |
 
-> **触覚アームの動画を撮るときは §6.9 を読むこと。** 方策を回しながら録画すると成功率が 56.25% → 3.91% に落ちる。
+> **触覚アームの動画を撮るときは §6.11 を読むこと。** 方策を回しながら録画すると成功率が 56.25% → 3.91% に落ちる。
 
 ### 5.4 学習時間の目安（RTX 5080・128 env・実測）
 
@@ -337,7 +337,40 @@ Ollama は**サービスが常駐したままモデルだけロードされて�
 
 ∴ **「同じエピソードを撮り直す」ことはできない。** 評価値の再現は厳密一致ではなく、既知範囲に収まるかで判定する。
 
-### 6.9 右の GelSight は左より感度が低い（上流アセットの問題）
+### 6.9 `tacex` を editable install すると constraints が破られる
+
+`pip install -e source/tacex` が **`pre-commit` を引き込み**、それが `virtualenv` 経由で
+`filelock` を **3.13.1 → 3.32.x へ引き上げる**。
+
+```
+tacex ─→ pre-commit ─→ virtualenv ─→ filelock 3.32.2
+                                     ↑ isaacsim-core は filelock==3.13.1 を要求
+                                       env/constraints.txt も 3.13.1 を固定
+```
+
+**`-c constraints.txt` を付けていても防げない**（`-c` は直接指定したパッケージにしか効かず、
+依存の依存までは縛らない）。導入直後に必ず確認すること。
+
+```powershell
+$PY = "D:\IsaacStack\env_tacex_isaac\Scripts\python.exe"
+& $PY -m pip show filelock | Select-String "Version"        # 3.13.1 であること
+& $PY -m pip install -c env\constraints.txt filelock==3.13.1   # 違えば戻す
+```
+
+実害は観測されていない（`pip check` は通り、学習も完走する）。ただし
+**「凍結環境は constraints 準拠」という宣言と実態が食い違う**ので、
+再現性を主張する記録ではこの点に触れること。
+
+> **走行中の venv を書き換えない。** `filelock` は torch / huggingface_hub / virtualenv が
+> 依存しており、実行中のプロセスが遅延ロードしうる。長時間ジョブを壊す。
+> 修正前に必ずプロセスを確認する:
+> ```powershell
+> Get-CimInstance Win32_Process -Filter "Name='python.exe'" |
+>   Where-Object { $_.CommandLine -like "*env_tacex_isaac*" } |
+>   Select-Object ProcessId, CommandLine
+> ```
+
+### 6.10 右の GelSight は左より感度が低い（原因未特定）
 
 **上流のロボットアセットで右のゲルパッドが 0.29mm ずれて取り付けられている。** Taxim の押し込み量が左右共通の定数（`gelpad_to_camera_min_distance = 24.0mm`）を引くため、このずれがそのまま感度差になる。
 
@@ -382,7 +415,7 @@ cmd /c "$PY -u scripts\exp_tacex\check_gelsight_symmetry.py --label A_original -
 オフセットを変えた variant を作って調べるには `make_gelpad_variant.py`（**`pxr` が要るので
 Isaac 非依存の venv で実行する**。Isaac の venv には usd-core が入っていない）。
 
-### 6.10 触覚アームは録画すると成功率が落ちる
+### 6.11 触覚アームは録画すると成功率が落ちる
 
 カメラ（replicator の render product）を作るだけで GelSight の画像が変わり、触覚アーム（403次元）の入力が学習時の分布から外れる。実測: **成功率 56.25% → 3.91%**。照明を切っても warmup を 0 にしても同じ 5/128 で、決定論的な差だった。step 0 の物理は完全一致なのに触覚だけ最大 0.263 ずれる。
 
@@ -492,7 +525,7 @@ FORGE のエピソード別: `0.961 / 0.938 / 0.938 / 0.930`、成功時の平�
 | TacEx（触覚なし） | `render_failure_cases.py --arm off`（同上） | 960×540・6.3MB・`observation_space: 19` |
 | TacEx（触覚あり） | `render_failure_cases.py --arm on --no_render --log_pose` → `replay_render.py`（**姿勢再生**） | 960×540・5.4MB・`observation_space: 403` |
 
-触覚ありだけ2段階なのは §6.9 のため。方策を回しながら録画すると挙動そのものが変わるので、姿勢を記録してから書き戻して描画する。
+触覚ありだけ2段階なのは §6.11 のため。方策を回しながら録画すると挙動そのものが変わるので、姿勢を記録してから書き戻して描画する。
 
 生成物（`results/sample_tacex/`）:
 
