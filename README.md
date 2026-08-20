@@ -350,28 +350,37 @@ Ollama は**サービスが常駐したままモデルだけロードされて�
 
 **接触後の領域に限った話。** 接触前（step 0–7）では左右ほぼ対称（比 0.96）で、判定窓が接触前なら影響しない。詳細と経緯は [`docs/gelsight-right-sensor-asymmetry.md`](docs/gelsight-right-sensor-asymmetry.md)。
 
-### 確認と修正
+### ⚠ 直し方は分かっていない
+
+**「ゲルパッドを対称に直す」は実験で否定された。** 別マシン（PC1・RTX 4060）での実測:
+
+| ゲルパッドの joint 差 | 高さマップ左右差 | 押し込み比 L/R |
+|---|---|---|
+| +0.2954 mm（元アセット） | +0.2498 mm | 1.698 |
+| **0.0 mm（幾何的に対称）** | **+0.5441 mm** | **3.560**（悪化） |
+| −0.5441 mm | −0.0002 mm | 0.9996 |
+
+**対称にすると倍に悪化する。** 系にはゲルパッド配置とは別に約 0.5441mm の非対称があり、
+元アセットのオフセットはそれを部分的に打ち消していた。**真因は未特定。**
+
+実効な制御点は**リンクの xform ではなく FixedJoint のローカルフレーム**（`physics:localPos0`）。
+同じ値が2箇所に書かれていて、PhysX が使うのはジョイント側。
+
+### 確認する
 
 **方策も学習済みチェックポイントも要らない。** 環境を作ってリセットし、両センサの生データを読むだけ。
 
 ```powershell
 $PY = "D:\IsaacStack\env_tacex_isaac\Scripts\python.exe"
-
-# 対称化アセットを作る（GPU 不要・元アセットは無改変）
-& $PY scripts\exp_tacex\make_symmetric_gelpads.py
-
-# A) 元アセット  B) 対称化アセット
-cmd /c "$PY -u scripts\exp_tacex\check_gelsight_symmetry.py --label A_original  --headless > results\sym_A.log 2>&1"
-cmd /c "$PY -u scripts\exp_tacex\check_gelsight_symmetry.py --label B_symmetric --symmetric --headless > results\sym_B.log 2>&1"
+cmd /c "$PY -u scripts\exp_tacex\check_gelsight_symmetry.py --label A_original --headless > results\sym_A.log 2>&1"
 ```
 
-各ランが `SYMMETRY_OK` / `SYMMETRY_ASYMMETRIC` を印字する。判定式は
-**|高さマップの左右差| < 0.05mm かつ 押し込み量の比 L/R が [0.80, 1.25]**。
-同一マシン内の A/B で完結するので、他機の数値と突き合わせる必要はない。
+`SYMMETRY_OK` / `SYMMETRY_ASYMMETRIC` を印字し、終了コードでも返す（0=OK / 1=非対称 / 2=アセット無し / 3=例外）。
+判定式は **|高さマップの左右差| < 0.05mm かつ 押し込み量の比 L/R が [0.80, 1.25]**。
+同一マシン内で完結するので、他機の数値と突き合わせる必要はない。
 
-> **修正の効果は未検証**（2026-08-20 時点）。`Articulation()` 生成後に USD の xform を書き換える
-> 方式は**効かない**ことが分かっており（PhysX が解析済みのため）、アセット自体を直す方式に
-> 変えたところまでが現状。GPU での A/B は他セッションの長時間学習の後に行う。
+オフセットを変えた variant を作って調べるには `make_gelpad_variant.py`（**`pxr` が要るので
+Isaac 非依存の venv で実行する**。Isaac の venv には usd-core が入っていない）。
 
 ### 6.10 触覚アームは録画すると成功率が落ちる
 

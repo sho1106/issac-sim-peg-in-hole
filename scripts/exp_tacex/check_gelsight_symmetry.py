@@ -29,6 +29,7 @@ import argparse
 import json
 import os
 import pathlib
+import sys
 
 # ★ uipc は AppLauncher より前に読む。後だと PyInit_pyuipc で access violation。
 try:
@@ -165,6 +166,15 @@ def main() -> int:
 
 try:
     _rc = main()
+except Exception:  # noqa: BLE001
+    import traceback
+    traceback.print_exc()
+    _rc = 3
 finally:
     # Isaac の終了処理はハングすることがある。判定は上で印字済み。
     app.close()
+
+# app.close() の後の print は出ないことがあるので、判定は main() 内で印字済み。
+# 終了コードは自動判定（CI・キュー）から使うので必ず返す。
+#   0 = SYMMETRY_OK / 1 = SYMMETRY_ASYMMETRIC / 2 = 対称化アセットが無い / 3 = 例外
+sys.exit(_rc)

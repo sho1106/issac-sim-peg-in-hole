@@ -1,5 +1,6 @@
 # 実行時の出力（再生成できるもの）
 results/
+!results/.gitkeep
 # hydra が cwd に作る作業ディレクトリ
 outputs/
 *.log
