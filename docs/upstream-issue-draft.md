@@ -24,7 +24,7 @@ systematically weaker than the left one **after contact**. Before contact the tw
 
 I could not find the root cause and would appreciate a pointer from someone who knows how the
 gripper asset was authored. I have a self-contained reproduction script and have ruled out
-three plausible explanations, listed below.
+four plausible explanations, listed below.
 
 | | left | right | ratio L/R |
 |---|---|---|---|
@@ -90,18 +90,40 @@ Moving the right gelpad by **11 mm** (20x the asymmetry) produced **bit-identica
 (same `num_envs`, seed and initial conditions). What the camera images is the **peg**, seen as a
 horizontal band; the gelpad does not appear in the depth buffer.
 
-**3. Making the gelpads symmetric makes it worse.**
+**3. It is not the other joints or the meshes.**
+The finger prismatic joints are properly mirror-symmetric (same `localPos`, axis, limits and
+drive; `localRot` differs only by the mirror sign). The gelpad meshes are mirror-identical
+(same vertex count, thickness, and min/mean/median of the projected point distribution to 1e-4).
+`gsmini_*_joint` has a 0.163 mm asymmetry in its own z, but projected on the grip axis that is
+−0.0001 mm. Composing the whole joint chain gives +0.2982 mm, essentially the same as the xform
+figure — it does not account for the ~0.49 mm residual.
+
+**4. Making the gelpads symmetric makes it worse.**
 Setting the joint difference to 0 (geometrically symmetric pads) doubled the asymmetry:
 
 | gelpad joint difference | height map diff | indentation ratio |
 |---|---|---|
-| +0.2954 mm (as shipped) | +0.2498 mm | 1.698 |
-| **0.0 mm (symmetric)** | **+0.5441 mm** | **3.560** |
-| −0.5441 mm | −0.0002 mm | 0.9996 |
+| 0.0000 mm (**geometrically symmetric**) | **+0.5397 mm** | **8.721** |
+| 0.1500 mm | +0.3877 mm | 2.753 |
+| **0.2954 mm (as shipped)** | **+0.2498 mm** | **1.698** |
+| 0.4000 mm | +0.1547 mm | 1.339 |
+| 0.5441 mm | +0.1135 mm | 1.229 |
+| 0.8000 mm | −0.0079 mm | 0.988 |
 
-The observed difference is linear in the joint difference (slope 0.9963, i.e. ~1:1 mm/mm).
-So there is a **separate ~0.5441 mm asymmetry in the system, and the shipped gelpad offset was
+Least squares: `hm_diff = -0.6767 * joint_diff + 0.4865` (R² = 0.9483, zero crossing 0.7190 mm).
+
+So there is a **separate ~0.49 mm asymmetry in the system, and the shipped gelpad offset is
 partially cancelling it.**
+
+Two caveats I want to be explicit about:
+
+- The **finger joints saturate around joint_diff ≈ 0.4 mm** — they pin to the same values for
+  0.40 / 0.5441 / 0.80. A naive "wider gap → peg moves" model only holds below that.
+- The system is **deterministic but multistable**. Re-running the same USD three times gives
+  bit-identical results, but two files with the *same* joint difference (0.0002 mm apart) gave
+  height map differences 0.114 mm apart, settling at different grasp equilibria. So the link
+  xform does matter — it sets the spawn pose, which selects which equilibrium is reached.
+  **Extrapolating the fit to pick a "correct" offset is not sound.**
 
 ### Where I got stuck
 
@@ -115,9 +137,16 @@ Reading the runtime physics poses (`body_pos_w`, projected on the axis joining t
 | `panda_leftfinger` / `panda_rightfinger` | −0.1407 / −0.0178 | −0.1229 |
 | held peg (`root_pos_w`) | **+0.1295** | — |
 
-The peg sits **0.1295 mm toward the right camera**, so geometrically the right camera should be
-**0.259 mm closer** to it. The measured height map says the right is **0.273 mm farther**.
-The sign is inverted, and the gap (0.53 mm) matches the hidden ~0.5441 mm above.
+The peg sits **0.1295 mm toward the right camera** (0.1333 mm on the other machine), so
+geometrically the right camera should be **~0.26 mm closer** to it. The measured height map says
+the right is **~0.27 mm farther**. The sign is inverted.
+
+With a geometrically symmetric gelpad placement (joint_diff = 0) the fingers still end up
+asymmetric: left −0.2871 mm, right +0.1286 mm. The gripper command is symmetric
+(`ctrl_target_joint_pos[:, 7:9] = 0.0` for both) and the joints are symmetric, so this points at
+the reset / grasp construction rather than the asset geometry. The peg is placed analytically
+relative to `panda_fingertip_centered`, which sits −0.0822 mm off the midpoint of the two
+sensor cameras — the Franka frame and the added sensors have no reason to coincide.
 
 One possibility I could not confirm: the right camera may not be seeing the nearest point of the
 peg. Its visible area is 11.39 % vs 17.32 %, and the centroid of the visible region is ~5 px
