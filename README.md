@@ -57,7 +57,7 @@ issac-sim-peg-in-hole/
 │   ├─ doctor.py          Blackwell 固有の地雷を数秒で判定（Isaac を起動しない）
 │   ├─ verify_setup.py    Isaac を起動してタスク登録を確認（約10秒）
 │   ├─ exp_forge/         FORGE の評価・録画
-│   ├─ exp_tacex/         TacEx の評価
+│   ├─ exp_tacex/         TacEx の評価・録画・左右対称性チェック
 │   └─ lib/               共通モジュール
 ├─ env/
 │   ├─ constraints.txt        壊してはいけない依存ピン（pip に必ず -c で渡す）
@@ -348,7 +348,30 @@ Ollama は**サービスが常駐したままモデルだけロードされて�
 
 右の高さマップから実測のオフセット 0.2688mm を引くと**比が 0.99 になる**＝取り付けずれだけで説明できる。
 
-**触覚 384 次元のうち右指ぶんの 192 次元が systematically 弱い。** 触覚を入れた学習の結果を読むときはこれを前提にすること。詳細と直し方は [`docs/gelsight-right-sensor-asymmetry.md`](docs/gelsight-right-sensor-asymmetry.md)。
+**接触後の領域に限った話。** 接触前（step 0–7）では左右ほぼ対称（比 0.96）で、判定窓が接触前なら影響しない。詳細と経緯は [`docs/gelsight-right-sensor-asymmetry.md`](docs/gelsight-right-sensor-asymmetry.md)。
+
+### 確認と修正
+
+**方策も学習済みチェックポイントも要らない。** 環境を作ってリセットし、両センサの生データを読むだけ。
+
+```powershell
+$PY = "D:\IsaacStack\env_tacex_isaac\Scripts\python.exe"
+
+# 対称化アセットを作る（GPU 不要・元アセットは無改変）
+& $PY scripts\exp_tacex\make_symmetric_gelpads.py
+
+# A) 元アセット  B) 対称化アセット
+cmd /c "$PY -u scripts\exp_tacex\check_gelsight_symmetry.py --label A_original  --headless > results\sym_A.log 2>&1"
+cmd /c "$PY -u scripts\exp_tacex\check_gelsight_symmetry.py --label B_symmetric --symmetric --headless > results\sym_B.log 2>&1"
+```
+
+各ランが `SYMMETRY_OK` / `SYMMETRY_ASYMMETRIC` を印字する。判定式は
+**|高さマップの左右差| < 0.05mm かつ 押し込み量の比 L/R が [0.80, 1.25]**。
+同一マシン内の A/B で完結するので、他機の数値と突き合わせる必要はない。
+
+> **修正の効果は未検証**（2026-08-20 時点）。`Articulation()` 生成後に USD の xform を書き換える
+> 方式は**効かない**ことが分かっており（PhysX が解析済みのため）、アセット自体を直す方式に
+> 変えたところまでが現状。GPU での A/B は他セッションの長時間学習の後に行う。
 
 ### 6.10 触覚アームは録画すると成功率が落ちる
 
